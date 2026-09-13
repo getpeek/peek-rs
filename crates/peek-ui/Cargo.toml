@@ -1,0 +1,25 @@
+[package]
+name = "peek-ui"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+gpui-kit.workspace = true
+peek-config.workspace = true
+peek-document.workspace = true
+peek-canvas.workspace = true
+peek-theme.workspace = true
+peek-lsp.workspace = true
+peek-db.workspace = true
+# `preserve_order` is on workspace-wide, so a JSON cell renders its keys in the order the
+# database returned them rather than alphabetically.
+serde_json.workspace = true
+anyhow.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

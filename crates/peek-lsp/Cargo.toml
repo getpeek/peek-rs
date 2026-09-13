@@ -1,0 +1,20 @@
+[package]
+name = "peek-lsp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lsp-types.workspace = true
+tree-sitter.workspace = true
+tree-sitter-sequel.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+sqlformat.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

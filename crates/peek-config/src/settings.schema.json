@@ -1,0 +1,302 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://peek.local/settings.schema.json",
+  "title": "Peek Settings",
+  "description": "User settings for the Peek database GUI.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Reference to this JSON Schema file. Lets editors provide autocomplete and validation."
+    },
+    "name": {
+      "type": "string",
+      "description": "Display name used in multiplayer sessions. Defaults to the system $USER."
+    },
+    "theme": {
+      "type": "string",
+      "enum": ["pine", "midnight", "midday", "terminal", "paper", "blueprint"],
+      "default": "pine",
+      "description": "UI color theme."
+    },
+    "ai": {
+      "type": "object",
+      "description": "AI configuration for the built-in agent and background features.",
+      "additionalProperties": false,
+      "properties": {
+        "default_provider": {
+          "type": "string",
+          "enum": ["ollama", "acp"],
+          "default": "ollama",
+          "description": "Default backend for new Agent nodes (each node can switch). 'ollama' uses the ollama block below; 'acp' spawns an external Agent Client Protocol agent (e.g. Claude Code)."
+        },
+        "ollama": {
+          "type": "object",
+          "description": "OpenAI/Ollama-compatible completion endpoint (local or remote). Backs the 'ollama' agent provider and background AI (query labels, region names). Omit this block to disable those features.",
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "type": "string",
+              "default": "gemma4:e2b",
+              "description": "Model identifier passed to the endpoint."
+            },
+            "url": {
+              "type": "string",
+              "format": "uri",
+              "default": "http://localhost:11434",
+              "description": "Base URL of the OpenAI/Ollama-compatible server."
+            }
+          }
+        },
+        "automatically_label_queries": {
+          "type": "boolean",
+          "default": false,
+          "description": "When a query node is executed, ask the AI for a short label and show it as the node's title. Requires the ollama block."
+        },
+        "acp": {
+          "type": "object",
+          "description": "External ACP agent to spawn when provider is 'acp'. Defaults to the Claude Code adapter via npx. Best paired with mcp.enable so the agent can drive the canvas.",
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "type": "string",
+              "default": "npx",
+              "description": "Executable that launches the ACP agent."
+            },
+            "args": {
+              "type": "array",
+              "items": { "type": "string" },
+              "default": ["-y", "@agentclientprotocol/claude-agent-acp"],
+              "description": "Arguments passed to the agent command."
+            },
+            "env": {
+              "type": "object",
+              "additionalProperties": { "type": "string" },
+              "description": "Extra environment variables for the agent subprocess (e.g. ANTHROPIC_API_KEY). The agent handles its own auth."
+            },
+            "cwd": {
+              "type": "string",
+              "description": "Session root handed to the agent. Defaults to Peek's config directory (~/peek)."
+            }
+          }
+        },
+        "mcp": {
+          "type": "object",
+          "description": "Model Context Protocol server. Lets AI agents drive Peek. Takes effect on restart.",
+          "additionalProperties": false,
+          "properties": {
+            "enable": {
+              "type": "boolean",
+              "default": false,
+              "description": "Run the MCP server at startup."
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "default": 13315,
+              "description": "Port the MCP server listens on (binds 0.0.0.0)."
+            }
+          }
+        }
+      }
+    },
+    "canvas": {
+      "type": "object",
+      "description": "Canvas behavior.",
+      "additionalProperties": false,
+      "properties": {
+        "enable_regions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Region grouping and wayfinding on the canvas: zoom-out beacons, off-screen edge peekers and the regions menu."
+        },
+        "minimap": {
+          "type": "string",
+          "enum": ["show", "hide"],
+          "default": "hide",
+          "description": "Overview minimap in the bottom-right corner of the canvas: a colored rectangle per node plus the current viewport, draggable to pan."
+        }
+      }
+    },
+    "ui": {
+      "type": "object",
+      "description": "UI chrome behavior.",
+      "additionalProperties": false,
+      "properties": {
+        "pages": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "show_as": {
+              "type": "string",
+              "enum": ["tabs", "list"],
+              "default": "tabs",
+              "description": "How pages are surfaced in the titlebar: 'tabs' shows a horizontal tab strip; 'list' shows a single pill that opens a keyboard-navigable page list."
+            }
+          }
+        },
+        "titlebar": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Show or hide individual items in the titlebar. Hiding an item only removes it from the titlebar; the underlying feature still works (the command palette via its hotkey, live queries keep running, and the collaboration popover still opens from the command palette).",
+          "properties": {
+            "command_palette_button": {
+              "type": "string",
+              "enum": ["show", "hide"],
+              "default": "show",
+              "description": "Show or hide the command palette button in the titlebar."
+            },
+            "collaboration_button": {
+              "type": "string",
+              "enum": ["show", "hide"],
+              "default": "show",
+              "description": "Show or hide the collaboration button in the titlebar."
+            },
+            "live_query_count": {
+              "type": "string",
+              "enum": ["show", "hide"],
+              "default": "show",
+              "description": "Show or hide the live query count indicator in the titlebar."
+            }
+          }
+        }
+      }
+    },
+    "workspaces": {
+      "type": "array",
+      "description": "Workspaces shown in the connection picker. Each groups one or more database connections.",
+      "items": {
+        "$ref": "#/$defs/workspace"
+      }
+    },
+    "keymap": {
+      "type": "object",
+      "description": "Keyboard shortcut overrides, mapping a key combo to an action. Only list the bindings you want to change; everything else keeps its default. Key syntax: a lowercase trigger (e.g. q, 0, escape, arrowleft) optionally prefixed with meta-, shift-, alt-, ctrl- joined by - (e.g. meta-shift-0). See docs/keymap.md.",
+      "additionalProperties": {
+        "type": "string",
+        "description": "The action this key triggers.",
+        "enum": [
+          "Tool::Select",
+          "Tool::LassoSelect",
+          "Tool::Query",
+          "Tool::Agent",
+          "Tool::Text",
+          "Tool::Variable",
+          "Tool::Draw",
+          "Edit::Cut",
+          "Edit::Copy",
+          "Edit::Paste",
+          "Edit::SelectAll",
+          "Edit::DeleteSelection",
+          "History::Undo",
+          "History::Redo",
+          "Zoom::Reset",
+          "Zoom::FitView",
+          "Page::New",
+          "Page::Close",
+          "Page::Previous",
+          "Page::Next",
+          "Page::SelectPreviousQuery",
+          "Page::SelectNextQuery",
+          "Page::SelectNodeLeft",
+          "Page::SelectNodeRight",
+          "Page::SelectNodeUp",
+          "Page::SelectNodeDown",
+          "Page::GoToNode",
+          "Page::Search",
+          "Page::OpenPicker",
+          "View::ToggleUi",
+          "View::ToggleCameraLock",
+          "View::ShowRunningQueries",
+          "Query::Format",
+          "Result::Pivot",
+          "Region::GroupSelection",
+          "Region::UngroupSelection",
+          "Region::OpenPicker",
+          "CommandPalette::Open",
+          "ConnectionPicker::Open",
+          "App::Quit",
+          "Help::Keymap"
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Workspace name shown in the UI."
+        },
+        "connections": {
+          "type": "array",
+          "description": "Database connections belonging to this workspace.",
+          "items": {
+            "$ref": "#/$defs/connection"
+          }
+        }
+      },
+      "required": ["name", "connections"]
+    },
+    "connection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Connection name shown in the UI."
+        },
+        "color": {
+          "type": "string",
+          "description": "Accent color (CSS color string) used to mark this connection in the UI."
+        },
+        "url": {
+          "type": "string",
+          "description": "Database connection URL, e.g. postgres://user:pass@host:5432/dbname or mysql://..."
+        },
+        "ssh_tunnel": {
+          "anyOf": [{ "$ref": "#/$defs/sshTunnel" }, { "type": "null" }],
+          "description": "Optional SSH tunnel used to reach the database through a bastion host."
+        }
+      },
+      "required": ["name", "color", "url"]
+    },
+    "sshTunnel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ssh_host": {
+          "type": "string",
+          "description": "SSH bastion host (hostname or IP)."
+        },
+        "ssh_user": {
+          "type": "string",
+          "description": "SSH username on the bastion host."
+        },
+        "key_path": {
+          "type": "string",
+          "description": "Absolute path to the SSH private key file (e.g. a .pem)."
+        },
+        "ssh_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 22,
+          "description": "SSH port on the bastion host."
+        },
+        "local_port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "default": 15432,
+          "description": "Local port the tunnel binds to. Set to 0 to let the OS pick a free port."
+        }
+      },
+      "required": ["ssh_host", "ssh_user", "key_path"]
+    }
+  }
+}

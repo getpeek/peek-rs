@@ -1,0 +1,128 @@
+[package]
+name = "peek"
+version = "5.0.0"
+description = "A Database GUI"
+authors = ["Damoon Rashidi"]
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "peek"
+path = "src/main.rs"
+
+[dependencies]
+peek-ui.workspace = true
+env_logger.workspace = true
+
+[lints]
+workspace = true
+
+[workspace]
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.90"
+
+[workspace.dependencies]
+peek-config = { path = "crates/peek-config" }
+peek-document = { path = "crates/peek-document" }
+peek-canvas = { path = "crates/peek-canvas" }
+peek-ui = { path = "crates/peek-ui" }
+peek-theme = { path = "crates/peek-theme" }
+peek-lsp = { path = "crates/peek-lsp" }
+peek-db = { path = "crates/peek-db" }
+peek-acp = { path = "crates/peek-acp" }
+peek-mcp = { path = "crates/peek-mcp" }
+gpui-kit = { version = "0.6.1", features = ["tree-sitter-sql"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+nanoid = "0.4"
+lsp-types = "0.97"
+# 0.26 rather than the reference's 0.25: `tree-sitter` sets `links = "tree-sitter"`, so the
+# whole graph must agree on one version, and gpui-component pins 0.26. The grammar is shared
+# with gpui-component's highlighter, which is the point.
+tree-sitter = "0.26"
+tree-sitter-sequel = "0.3.11"
+dashmap = "6"
+parking_lot = "0.12"
+sqlformat = "0.5"
+sqlx = { version = "0.8.6", features = [
+  "postgres",
+  "mysql",
+  "uuid",
+  "chrono",
+  "rust_decimal",
+  "runtime-tokio",
+  "tls-rustls",
+] }
+uuid = "1.17"
+chrono = { version = "0.4", features = ["serde"] }
+rust_decimal = { version = "1.37", features = ["serde"] }
+base64 = "0.22"
+russh = "0.54"
+url = "2"
+tokio = { version = "1", features = [
+  "net",
+  "io-util",
+  "rt-multi-thread",
+  "sync",
+  "macros",
+  "time",
+  "process",
+] }
+agent-client-protocol = "1.3.0"
+tower-mcp = { version = "0.12", features = ["http", "macros"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+schemars = "1"
+async-trait = "0.1"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -2 }
+module_name_repetitions = "allow"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+
+[workspace.lints.rust]
+# `deny` rather than `forbid`: the macOS dock-icon module needs one audited `unsafe`
+# block behind an item-level allow.
+unsafe_code = "deny"
+dead_code = "deny"
+unused_variables = "deny"
+unused_imports = "deny"
+unused_import_braces = "deny"
+missing_debug_implementations = "deny"
+unreachable_pub = "deny"
+
+[profile.dev]
+debug = "limited"
+split-debuginfo = "unpacked"
+
+# gpui's layout/text/render hot paths are unusable at opt-level 0; pin only those
+# (gpui-kit's own recommendation) and keep workspace crates at 0 for fast rebuilds.
+[profile.dev.package]
+gpui-pre = { opt-level = 3 }
+gpui-pre-platform = { opt-level = 3 }
+gpui-pre-macros = { opt-level = 3 }
+gpui-pre-sum-tree = { opt-level = 3 }
+gpui-component = { opt-level = 3 }
+gpui-kit = { opt-level = 3 }
+gpui-kit-assets = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
+resvg = { opt-level = 3 }
+smol = { opt-level = 3 }
+ropey = { opt-level = 3 }
+tree-sitter = { opt-level = 3 }
+tree-sitter-sequel = { opt-level = 3 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,111 @@
+//! gpui-kit views for Peek: the window, the canvas and its node shells, and the command
+//! registry that keyboard shortcuts, the palette and buttons all dispatch through.
+
+use gpui_kit::component::Root;
+use gpui_kit::prelude::*;
+use gpui_kit::{Bounds, WindowBounds, WindowOptions, px, size};
+use peek_config::{PeekConfig, PersistenceMode};
+
+mod assets;
+mod autosave;
+mod canvas;
+pub mod commands;
+mod database;
+mod execution;
+mod node;
+mod theme_picker;
+mod title_bar;
+mod workspace;
+
+pub use workspace::WorkspaceView;
+
+/// Command-line launch options.
+#[derive(Debug, Clone, Default)]
+pub struct Launch {
+    pub workspace: Option<String>,
+    pub connection: Option<String>,
+    /// Whether this run may write to `~/peek`. Opt-in while the TypeScript app still owns the
+    /// same files; it autosaves on its own three-second debounce.
+    pub persistence: PersistenceMode,
+}
+
+impl Launch {
+    /// Parses `--workspace <name> --connection <name> [--write | --read-only]`.
+    #[must_use]
+    pub fn from_args(args: impl IntoIterator<Item = String>) -> Self {
+        let mut launch = Self::default();
+        let mut args = args.into_iter().skip(1);
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--workspace" => launch.workspace = args.next(),
+                "--connection" => launch.connection = args.next(),
+                "--write" => launch.persistence = PersistenceMode::ReadWrite,
+                "--read-only" => launch.persistence = PersistenceMode::ReadOnly,
+                _ => log::warn!("peek: ignoring unknown argument {arg:?}"),
+            }
+        }
+        launch
+    }
+}
+
+/// Installs everything a window needs before it opens: gpui-kit, the theme globals, the
+/// keymap and the app-level actions. Tests call this instead of [`run`].
+pub fn init(config: &PeekConfig, cx: &mut gpui_kit::App) {
+    gpui_kit::init(cx);
+    register_sql_grammar();
+    node::query::language::SqlLanguage::init(cx);
+    database::Database::init(cx);
+    peek_theme::ThemeService::init(config.theme, cx);
+    commands::keymap::bind(&config.keymap, cx);
+    cx.on_action(|_: &commands::actions::app::Quit, cx| cx.quit());
+}
+
+/// Overrides the bundled `sql` grammar with one whose captures match the roles a Peek theme
+/// colours. Registering under the same name replaces the built-in entry, so every
+/// `EditorState::language("sql")` resolves to this one.
+fn register_sql_grammar() {
+    use gpui_kit::component::highlighter::{GrammarConfig, LanguageRegistry};
+
+    LanguageRegistry::singleton().register(
+        "sql",
+        &GrammarConfig::new(
+            "sql",
+            peek_lsp::sql_language(),
+            Vec::new(),
+            &peek_lsp::sql_highlights(),
+            "",
+            "",
+        ),
+    );
+}
+
+/// Starts the application. Blocks until the last window closes.
+///
+/// # Panics
+/// If the main window cannot be opened; there is nothing to show without it.
+pub fn run(launch: Launch) {
+    let app = gpui_kit::application().with_assets(assets::Assets);
+    app.run(move |cx| {
+        // Shared with the workspace view, which keeps it to reconnect on a connection switch.
+        let config = std::rc::Rc::new(PeekConfig::get_or_default());
+        if let Err(error) = PeekConfig::ensure_initialized_on_disk(launch.persistence) {
+            log::warn!("peek: {error}");
+        }
+        init(&config, cx);
+
+        let bounds = Bounds::centered(None, size(px(1280.0), px(840.0)), cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            // The bottom chrome is two panels, one pinned left and one centred, at the
+            // reference's own sizes; below about 750 px the centred one runs into the other.
+            window_min_size: Some(size(px(760.0), px(480.0))),
+            ..title_bar::window_options()
+        };
+        cx.open_window(options, |window, cx| {
+            let workspace = cx.new(|cx| WorkspaceView::new(config.clone(), &launch, window, cx));
+            cx.new(|cx| Root::new(workspace, window, cx))
+        })
+        .expect("the main window opens");
+        cx.activate(true);
+    });
+}

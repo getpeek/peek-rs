@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "activePageId": "page_agent001",
+  "pageOrder": ["page_agent001"],
+  "pages": {
+    "page_agent001": {
+      "id": "page_agent001",
+      "name": "Agent",
+      "viewport": { "x": 0, "y": 0, "zoom": 1 },
+      "edges": [],
+      "nodes": [
+        {
+          "id": "agent_WeHfhBWu",
+          "type": "agent",
+          "position": { "x": 1849.5, "y": -1623.25 },
+          "width": 627,
+          "height": 871,
+          "selected": false,
+          "measured": { "width": 627, "height": 871 },
+          "dragging": false,
+          "resizing": false,
+          "data": {
+            "query": "",
+            "provider": "acp",
+            "messages": [
+              { "type": "system", "message": "Session started", "timestamp": 1789117400000 },
+              { "type": "user", "message": "Which tables are largest?", "timestamp": 1789117401000 },
+              {
+                "type": "context",
+                "message": "Query and result",
+                "timestamp": 1789117401100,
+                "contextKey": "1f0a9c",
+                "contextKind": "schema"
+              },
+              {
+                "type": "context",
+                "message": "Query and result",
+                "timestamp": 1789117401200,
+                "contextKey": "2b7e41",
+                "contextKind": "result"
+              },
+              { "type": "thought", "message": "Check pg_class first.", "timestamp": 1789117401300 },
+              {
+                "type": "acp_tool",
+                "message": "",
+                "timestamp": 1789117401848,
+                "toolCallId": "toolu_01XFFpqwZKgSRSo2QzYCU7hL",
+                "toolName": "Load skill: peek",
+                "toolKind": "other",
+                "toolStatus": "completed"
+              },
+              {
+                "type": "acp_tool",
+                "message": "permission denied",
+                "timestamp": 1789117402000,
+                "toolCallId": "toolu_02",
+                "toolName": "Run shell command",
+                "toolKind": "execute",
+                "toolStatus": "failed",
+                "isError": true
+              },
+              {
+                "type": "plan",
+                "message": "",
+                "timestamp": 1789117402100,
+                "planEntries": [
+                  { "content": "Read the schema", "priority": "high", "status": "completed" },
+                  { "content": "Size each table", "priority": "medium", "status": "in_progress" }
+                ]
+              },
+              {
+                "type": "tool_call",
+                "message": "Looking it up.",
+                "timestamp": 1789117402200,
+                "toolCalls": [
+                  { "id": "call_1", "name": "create_query_node", "args": { "query": "select 1" } }
+                ]
+              },
+              {
+                "type": "tool_result",
+                "message": "{\"nodeId\":\"query_abc\"}",
+                "timestamp": 1789117402300,
+                "toolCallId": "call_1",
+                "toolName": "create_query_node"
+              },
+              { "type": "assistant", "message": "`orders` is the largest.", "timestamp": 1789117402400 },
+              { "type": "telepathy", "message": "from a newer build", "timestamp": 1789117402500 }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
