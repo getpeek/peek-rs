@@ -9,9 +9,11 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::collapsible::Collapsible;
 use gpui_kit::component::{Icon, StyledExt};
 use gpui_kit::prelude::*;
-use gpui_kit::{AnyElement, App, Hsla, SharedString, div, px, rems};
+use gpui_kit::{AnyElement, App, Hsla, SharedString, div, rems};
 use peek_document::AgentMessage;
 use peek_theme::ActivePeekTheme;
+
+use crate::node::scaled;
 
 use super::rows::ToolBlock;
 
@@ -118,7 +120,11 @@ fn disclosure(
                 .w_full()
                 .items_center()
                 .gap(rems(0.4))
-                .child(Icon::new(head.icon).size(px(13.0)).text_color(head.tint))
+                .child(
+                    Icon::new(head.icon)
+                        .size(rems(0.8125))
+                        .text_color(head.tint),
+                )
                 .child(
                     div()
                         .text_size(rems(0.72))
@@ -140,7 +146,7 @@ fn disclosure(
                     } else {
                         IconName::ChevronRight
                     })
-                    .size(px(14.0))
+                    .size(rems(0.875))
                     .text_color(theme.fg_subtle),
                 ),
         );
@@ -208,7 +214,7 @@ fn section(label: &str, body: &str, is_error: bool, cx: &App) -> AnyElement {
         .child(
             div()
                 .p(rems(0.5))
-                .rounded(theme.radius_card)
+                .rounded(scaled(theme.radius_card))
                 .bg(theme.node_inset)
                 .border_1()
                 .border_color(theme.node_border)

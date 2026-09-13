@@ -6,19 +6,44 @@ use gpui_kit::prelude::*;
 use gpui_kit::{Bounds, WindowBounds, WindowOptions, px, size};
 use peek_config::{PeekConfig, PersistenceMode};
 
+mod about;
 mod assets;
 mod autosave;
 mod canvas;
 pub mod commands;
 mod database;
 mod execution;
+mod fuzzy;
+mod keymap_help;
 mod mcp;
 mod node;
+mod settings;
 mod theme_picker;
 mod title_bar;
 mod workspace;
 
 pub use workspace::WorkspaceView;
+
+/// Readers for state the UI keeps in gpui globals, where an integration test — which links this
+/// crate as an outside user — otherwise cannot see it. Nothing in the app calls these.
+pub mod test_support {
+    use crate::settings::Settings;
+
+    /// The connections configured under `workspace`, in file order.
+    #[must_use]
+    pub fn connection_names(cx: &gpui_kit::App, workspace: &str) -> Vec<String> {
+        Settings::get(cx)
+            .workspace(workspace)
+            .map(|workspace| {
+                workspace
+                    .connections
+                    .iter()
+                    .map(|connection| connection.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
 
 /// Command-line launch options.
 #[derive(Debug, Clone, Default)]
@@ -52,7 +77,12 @@ impl Launch {
 /// Installs everything a window needs before it opens: gpui-kit, the theme globals, the
 /// keymap and the app-level actions. Tests call this instead of [`run`].
 pub fn init(config: &PeekConfig, cx: &mut gpui_kit::App) {
+    init_with(config, PersistenceMode::default(), cx);
+}
+
+fn init_with(config: &PeekConfig, persistence: PersistenceMode, cx: &mut gpui_kit::App) {
     gpui_kit::init(cx);
+    settings::Settings::init(config.clone(), persistence, cx);
     register_sql_grammar();
     node::query::language::SqlLanguage::init(cx);
     database::Database::init(cx);
@@ -93,7 +123,7 @@ pub fn run(launch: Launch) {
         if let Err(error) = PeekConfig::ensure_initialized_on_disk(launch.persistence) {
             log::warn!("peek: {error}");
         }
-        init(&config, cx);
+        init_with(&config, launch.persistence, cx);
 
         let bounds = Bounds::centered(None, size(px(1280.0), px(840.0)), cx);
         let options = WindowOptions {

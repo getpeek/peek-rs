@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use peek_config::PersistenceMode;
@@ -22,22 +23,27 @@ use crate::result::ResultSet;
 use crate::storage::StorageError;
 
 /// One connection's rows, keyed by result node id.
+///
+/// The sets are behind an [`Arc`] because the canvas hands one to its result node's table on
+/// every frame: a 6,515-row result copied per frame per visible node is tens of thousands of
+/// allocations for rows that almost never change. Sharing also lets the table decide whether
+/// it has new rows with a pointer comparison instead of walking every cell.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResultSidecar {
-    sets: BTreeMap<NodeId, ResultSet>,
+    sets: BTreeMap<NodeId, Arc<ResultSet>>,
 }
 
 impl ResultSidecar {
     #[must_use]
-    pub fn get(&self, node: &NodeId) -> Option<&ResultSet> {
+    pub fn get(&self, node: &NodeId) -> Option<&Arc<ResultSet>> {
         self.sets.get(node)
     }
 
-    pub fn insert(&mut self, node: NodeId, set: ResultSet) {
-        self.sets.insert(node, set);
+    pub fn insert(&mut self, node: NodeId, set: impl Into<Arc<ResultSet>>) {
+        self.sets.insert(node, set.into());
     }
 
-    pub fn remove(&mut self, node: &NodeId) -> Option<ResultSet> {
+    pub fn remove(&mut self, node: &NodeId) -> Option<Arc<ResultSet>> {
         self.sets.remove(node)
     }
 
@@ -73,7 +79,7 @@ impl ResultSidecar {
             .map(|(id, rows)| {
                 (
                     NodeId::from(id.as_str()),
-                    ResultSet::from_sidecar_rows(&rows),
+                    Arc::new(ResultSet::from_sidecar_rows(&rows)),
                 )
             })
             .collect();

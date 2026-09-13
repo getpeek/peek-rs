@@ -9,7 +9,7 @@
 
 use gpui_kit::{App, Context, Window};
 use peek_db::mutation::{self, NotEditable};
-use peek_document::{Cell, NodeData, ResultData};
+use peek_document::Cell;
 
 use super::ResultTable;
 use super::editable;
@@ -28,7 +28,7 @@ impl ResultTable {
         if !Database::is_connected(cx) {
             return;
         }
-        if self.editable_table(cx).is_none() {
+        if self.editable_table().is_none() {
             log::info!(
                 "peek: {} is not editable: {}",
                 self.node,
@@ -65,8 +65,11 @@ impl ResultTable {
     }
 
     /// The table this result can be edited through.
-    pub(super) fn editable_table(&self, cx: &App) -> Option<String> {
-        editable::editable_table(&peek_lsp::analyze_query(&self.result_query(cx)))
+    ///
+    /// Read from the cache `reconcile` fills when the SQL changes, not parsed here: the toolbar
+    /// asks on every frame to decide whether a delete button exists at all.
+    pub(super) fn editable_table(&self) -> Option<&str> {
+        self.editable.as_deref()
     }
 
     /// Builds the `UPDATE`, runs it, and re-runs the query behind the result.
@@ -123,7 +126,7 @@ impl ResultTable {
         cx: &App,
     ) -> Result<String, NotEditable> {
         let table_name = self
-            .editable_table(cx)
+            .editable_table()
             .ok_or(NotEditable::NotASingleTableSelect)?;
         let engine = Database::engine(cx);
         let draft = self
@@ -148,15 +151,15 @@ impl ResultTable {
             let schema = shared.read();
             schema
                 .primary_keys
-                .get(&table_name)
+                .get(table_name)
                 .cloned()
                 .unwrap_or_default()
         };
-        let bindings = editable::key_bindings(rows, editing.row, (&table_name, &keys), engine)?;
+        let bindings = editable::key_bindings(rows, editing.row, (table_name, &keys), engine)?;
 
         // An empty draft is NULL — how the NULL affordance works, without a separate flag.
         let literal = mutation::format_literal(&draft, &column.sql_type, engine);
-        mutation::build_update(engine, (&table_name, &column.name), &literal, &bindings)
+        mutation::build_update(engine, (table_name, &column.name), &literal, &bindings)
     }
 
     fn set_edit_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
@@ -198,14 +201,5 @@ impl ResultTable {
                 .child(message)
                 .into_any_element(),
         )
-    }
-
-    /// The query text behind this result, for the editable-table check.
-    pub(super) fn result_query(&self, cx: &App) -> String {
-        self.document
-            .read(cx)
-            .node(&self.node)
-            .and_then(|node| ResultData::get(&node.kind))
-            .map_or_else(String::new, |data| data.query.clone())
     }
 }

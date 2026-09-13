@@ -6,9 +6,11 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{Icon, StyledExt};
 use gpui_kit::prelude::*;
-use gpui_kit::{AnyElement, App, div, px, rems};
+use gpui_kit::{AnyElement, App, div, rems};
 use peek_document::PlanEntry;
 use peek_theme::ActivePeekTheme;
+
+use crate::node::scaled;
 
 pub(super) fn render(entries: &[PlanEntry], cx: &App) -> AnyElement {
     let theme = cx.peek_theme();
@@ -20,7 +22,7 @@ pub(super) fn render(entries: &[PlanEntry], cx: &App) -> AnyElement {
         .v_flex()
         .gap(rems(0.4))
         .p(rems(0.6))
-        .rounded(theme.radius_card)
+        .rounded(scaled(theme.radius_card))
         .bg(theme.node_inset)
         .border_1()
         .border_color(theme.node_border)
@@ -47,7 +49,7 @@ fn row(entry: &PlanEntry, cx: &App) -> impl IntoElement {
         .h_flex()
         .items_start()
         .gap(rems(0.4))
-        .child(Icon::new(icon).size(px(14.0)).text_color(tint))
+        .child(Icon::new(icon).size(rems(0.875)).text_color(tint))
         .child(
             div()
                 .text_size(rems(0.72))

@@ -68,6 +68,23 @@ Screenshots via `screencapture -x` are fine for a visual check of a fresh launch
 - `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all --check` must pass;
   the lint set is strict enough that both are part of "tests green".
 
+## Working in a tree with other sessions in it
+
+Four Claude sessions shared this working tree during the command-palette port, and three things
+cost real rework:
+
+- **`-D dead_code` plus `-D warnings` makes any half-written module fail the crate for everyone.**
+  An item-level `#[allow(dead_code, reason = "…")]` on new scaffolding is the neighbourly move,
+  and CLAUDE.md already sanctions it. Note the asymmetry: a *build* error blocks every other
+  session's tests, a *clippy* error blocks none of them — `cargo test` does not run clippy. Land
+  edits in states that compile, even if they are not yet tidy.
+- **Don't run `cargo fmt --all` while someone else holds a file open**; it rewrites their
+  in-flight work. `rustfmt --check` on your own files is the substitute until the tree settles.
+- **Restore, never reconstruct.** Recovering a clobbered entry from memory or from a stale brief
+  produces something that looks identical and carries whatever was wrong in the source. One
+  reconstruction here silently reintroduced a `CANVAS_NOT_TYPING` on a command whose handler is
+  on `WorkspaceView`, which would have been a dead binding.
+
 ## Asserting on a component you cannot name
 
 `window.find(id)` only resolves ids an element actually registers, and `within(outer)` scopes
@@ -84,6 +101,12 @@ worse than no test, because it reads as coverage.
 
 When the element is unreachable, assert on **state** instead of geometry, from a
 `#[gpui_kit::test]` inside the module that owns it, where the private entity is in scope.
+Two more gpui-component blind spots, found the hard way: `ElementSnapshot::disabled()` returns
+`None` for a `Button` even when `.disabled(true)` is set, and an `Input`'s value is not reachable
+by an id you gave it — it registers under `NamedInteger("input", …)` inside the component's own
+subtree. Assert on behaviour (did the click change anything?) or on a control that only one state
+renders.
+
 `EditorState::visible_row_range()` is the discriminating observable here: `0..3` of five rows
 with the bug, all five without it. `node/query/mod.rs`'s `layout_tests` is the worked example.
 

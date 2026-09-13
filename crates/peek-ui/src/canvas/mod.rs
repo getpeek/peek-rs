@@ -2,15 +2,18 @@
 //! `CanvasElement` that places node shells at camera-derived screen positions.
 
 mod convert;
+mod dispatch;
 mod edges;
 mod element;
+mod frame_stats;
 mod grid;
 mod hud;
 mod jump;
+mod page_search;
 mod toolbar;
 mod tools;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
 use gpui_kit::TestSupportExt;
@@ -27,7 +30,8 @@ use peek_canvas::flight::durations;
 use peek_canvas::gesture::{self, Effect, GestureConfig, Interaction};
 use peek_canvas::hit::{Corner, NodeRegion};
 use peek_canvas::jump::{JumpMode, Pressed};
-use peek_canvas::{Camera, CameraFlight, Document, Point, Rect, Scope, Size};
+use peek_canvas::render_scale;
+use peek_canvas::{Camera, CameraFlight, Detail, Document, Layout, Point, Rect, Scope, Size};
 use peek_document::{Edge, NodeId, NodeKind, NodeType, PageId};
 use peek_theme::{ActivePeekTheme, EdgeState};
 
@@ -38,6 +42,7 @@ use crate::title_bar::close_page;
 use convert::{to_pixel_bounds, to_pixel_point};
 use edges::EdgeItem;
 use element::{CanvasElement, NodeItem, Overlay};
+use frame_stats::{FrameStats, Phase};
 
 /// Screen-space slack around the viewport so nodes at the edge are built before they scroll in.
 const CULL_MARGIN_PX: f64 = 64.0;
@@ -49,6 +54,13 @@ const WHEEL_COMMIT_DELAY: Duration = Duration::from_millis(140);
 struct ActiveFlight {
     flight: CameraFlight,
     started: Instant,
+}
+
+/// A force layout in progress. Ticked from `render` on the wall clock exactly as a flight is;
+/// the run itself lives in [`dispatch::layout`].
+struct OrganizeRun {
+    layout: Layout,
+    last_tick: Instant,
 }
 
 pub(crate) struct CanvasView {
@@ -71,6 +83,8 @@ pub(crate) struct CanvasView {
     chrome_visible: bool,
     /// Jump mode: the labelled targets and what has been typed, or `None` when it is off.
     jump: Option<JumpMode>,
+    /// The page-search panel, or `None` when it is closed.
+    page_search: Option<page_search::PageSearch>,
     /// The node a running placement drag created, which the rest of the drag resizes. The
     /// reducer tracks the gesture; the id lives here because the document mints it.
     placement: Option<NodeId>,
@@ -78,6 +92,14 @@ pub(crate) struct CanvasView {
     /// a key *release* would otherwise clear, and that release never arrives once a dialog or
     /// another view has taken focus.
     _focus_out: Subscription,
+    /// The force layout `View::Organize` and `View::Schema` run, or `None` when nothing is
+    /// being arranged.
+    organize: Option<OrganizeRun>,
+    /// Frame timings, inert unless `PEEK_FRAME_STATS=1`.
+    frame_stats: FrameStats,
+    /// Whether node bodies are being built at this zoom. Retained because the thresholds
+    /// overlap: the tier inside the band is whatever the last frame settled on.
+    detail: Detail,
 }
 
 impl std::fmt::Debug for CanvasView {
@@ -99,7 +121,11 @@ impl CanvasView {
         cx: &mut Context<Self>,
     ) -> Self {
         let camera = Camera::from_viewport(document.read(cx).viewport());
-        cx.observe(&document, |_, _, cx| cx.notify()).detach();
+        cx.observe_in(&document, window, |this, document, window, cx| {
+            cx.notify();
+            this.frame_requested(&document, window, cx);
+        })
+        .detach();
         let focus_out = cx.on_focus_out(&focus_handle, window, |this, _, _, cx| {
             this.space_held = false;
             if this.jump.take().is_some() {
@@ -120,9 +146,22 @@ impl CanvasView {
             hovered: Hover::default(),
             chrome_visible: true,
             jump: None,
+            page_search: None,
             placement: None,
             _focus_out: focus_out,
+            organize: None,
+            frame_stats: FrameStats::new(),
+            detail: Detail::Full,
         }
+    }
+
+    /// Lets [`CanvasElement`] report its own phases; the element holds the view, not the stats.
+    pub(crate) fn record_frame_phase(&mut self, phase: Phase, elapsed: Duration) {
+        self.frame_stats.record(phase, elapsed);
+    }
+
+    pub(crate) fn frame_stats_enabled(&self) -> bool {
+        self.frame_stats.enabled()
     }
 
     pub(crate) fn camera(&self) -> Camera {
@@ -196,6 +235,24 @@ impl CanvasView {
     /// `cmd-z`, `backspace` and the rest until something else is clicked. `docs/canvas.md`
     /// describes the trap; this is the one place that recovers from it, so it covers deletion by
     /// any route — the Delete key, undo, MCP, or a page switch.
+    /// The detail tier for this frame.
+    ///
+    /// Held at [`Detail::Full`] whenever focus is somewhere other than the canvas itself, which
+    /// means an editor owns it. Dropping that editor's element mid-edit would kill its focus
+    /// handle and put the caret back to wherever it lands on the way in; `reclaim_focus` keeps
+    /// that from breaking the key bindings, but it cannot put the caret back. It costs nothing
+    /// in practice — a camera far enough out to reduce a node is too far out to read one, let
+    /// alone type into it.
+    fn resolved_detail(&self, window: &Window, cx: &App) -> Detail {
+        if window
+            .focused(cx)
+            .is_some_and(|focused| focused != self.focus_handle)
+        {
+            return Detail::Full;
+        }
+        peek_canvas::lod::detail(self.camera.zoom, self.detail)
+    }
+
     fn reclaim_focus(&self, window: &mut Window, cx: &mut App) {
         if window.focused(cx).is_none() {
             window.focus(&self.focus_handle, cx);
@@ -203,10 +260,16 @@ impl CanvasView {
     }
 
     pub(crate) fn scope(&self, cx: &App) -> Scope {
+        let settings = crate::settings::Settings::get(cx);
         Scope {
             camera_locked: self.camera_locked,
             chrome_hidden: !self.chrome_visible,
             connected: crate::database::Database::is_connected(cx),
+            settings: peek_canvas::SettingsScope {
+                pages_as_list: settings.ui.pages.show_as == peek_config::PageDisplay::List,
+                palette_button_hidden: settings.ui.titlebar.command_palette_button
+                    == peek_config::Visibility::Hide,
+            },
             ..self.document.read(cx).scope()
         }
     }
@@ -385,6 +448,28 @@ impl CanvasView {
         let target =
             Self::below_chrome(Camera::fit_bounds(bounds, pane, FitOptions::default()), top);
         self.fly_to(target, durations::FIT_VIEW, window, cx);
+    }
+
+    /// Flies to the nodes a finished run asked for, `focusCreated` in `executeQueries.ts`.
+    ///
+    /// The request is drained here rather than acted on where the run placed the nodes: the
+    /// camera needs the pane it is framing into, and only the view knows that.
+    fn frame_requested(
+        &mut self,
+        document: &Entity<Document>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let requested = document.update(cx, |document, _| document.take_framing());
+        let Some(bounds) = document.read(cx).bounds_of(&requested) else {
+            return;
+        };
+        let (pane, top) = self.framing_pane(window);
+        let target = Self::below_chrome(
+            Camera::fit_bounds(bounds, pane, FitOptions::padding(0.2)),
+            top,
+        );
+        self.fly_to(target, durations::FIT_NODES, window, cx);
     }
 
     fn fit_selection(
@@ -1251,6 +1336,63 @@ impl CanvasView {
 
     /// Builds one node's element tree: the shared shell around a per-kind body, or a bare
     /// body for the kinds that draw their own card.
+    /// Builds an element for every node the camera can see, and collects the rects the
+    /// selection ring is painted around.
+    ///
+    /// Split out of `render` because it is where the frame's cost actually is: everything else
+    /// there is chrome that does not scale with the page.
+    fn node_items(
+        &mut self,
+        visible: Rect,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Vec<NodeItem>, Vec<Rect>) {
+        // Cloned so the per-kind bodies below can take `&mut App`: `Entity::read` borrows it.
+        // Only what the camera can see is cloned: an agent node carries its whole message
+        // history, tool arguments and all, and a page of them is megabytes a frame otherwise.
+        let document = self.document.read(cx);
+        let total_nodes = document.nodes().len();
+        let nodes: Vec<peek_document::Node> = document
+            .nodes()
+            .iter()
+            .filter(|node| node.bounds().intersects(visible))
+            .cloned()
+            .collect();
+        let selection = document.selected().clone();
+        // Node membership only moves when the document does, and every route that adds or
+        // removes one bumps the revision — page switch and undo included. Collecting the ids
+        // per frame would be a string hash per node for an answer that almost never changes.
+        let revision = document.revision();
+        let live = self.node_states.needs_pruning(revision).then(|| {
+            document
+                .nodes()
+                .iter()
+                .map(|node| node.id.clone())
+                .collect()
+        });
+        if let Some(live) = live {
+            self.node_states.retain_live(&live, revision, cx);
+        }
+        self.detail = self.resolved_detail(window, cx);
+        self.reclaim_focus(window, cx);
+
+        let mut items = Vec::new();
+        let mut selected_rects = Vec::new();
+        for node in &nodes {
+            let world = node.bounds();
+            let selected = selection.contains(&node.id);
+            if selected {
+                selected_rects.push(world);
+            }
+            items.push(NodeItem {
+                world,
+                element: self.node_element(node, selected, window, cx),
+            });
+        }
+        self.frame_stats.tick(items.len(), total_nodes);
+        (items, selected_rects)
+    }
+
     fn node_element(
         &mut self,
         node: &peek_document::Node,
@@ -1258,13 +1400,26 @@ impl CanvasView {
         window: &mut Window,
         cx: &mut App,
     ) -> gpui_kit::AnyElement {
+        // A selected node keeps its body whatever the camera is doing: it is the one the user
+        // is working with, and it is what a `Zoom::FitSelection` is about to fly to.
+        let detail = if selected { Detail::Full } else { self.detail };
         let document = self.node_states.document().clone();
-        let state = self.node_states.get(node, window, cx);
+        // Retained state is created on first render, so building a reduced node must not ask
+        // for it: zooming out over a page of query nodes would otherwise open a language-server
+        // document for every one of them. Whatever already exists is left alone — `retain_live`
+        // prunes against the document, never against what is on screen.
+        let state = if detail.is_reduced() && !node::kind::is_bare(node) {
+            self.node_states.peek(&node.id)
+        } else {
+            self.node_states.get(node, window, cx)
+        };
         let context = node::kind::NodeContext {
             document: &document,
             state,
             selected,
-            zoom: self.camera.zoom,
+            detail,
+            size: node.size(),
+            zoom: render_scale(self.camera.zoom),
         };
         let body = node::kind::body(node, context, window, cx);
         if node::kind::is_bare(node) {
@@ -1348,11 +1503,15 @@ impl CanvasView {
         let theme = cx.peek_theme();
         let document = self.document.read(cx);
         let page = document.active_page();
+        // `Page::node` is a linear scan, and every edge needs two of them: on a page with as
+        // many edges as nodes that is quadratic work for a lookup, every frame.
+        let by_id: HashMap<&NodeId, &peek_document::Node> =
+            page.nodes.iter().map(|node| (&node.id, node)).collect();
         page.edges
             .iter()
             .filter_map(|edge| {
-                let source = page.node(&edge.source)?;
-                let target = page.node(&edge.target)?;
+                let source = *by_id.get(&edge.source)?;
+                let target = *by_id.get(&edge.target)?;
                 let curve = curve_between(source.bounds(), target.bounds());
                 if !curve.bounds().intersects(visible) {
                     return None;
@@ -1383,7 +1542,9 @@ fn edge_state(document: &Document, edge: &Edge) -> EdgeState {
 impl Render for CanvasView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.tick_flight(window, cx);
+        self.tick_layout(window, cx);
 
+        let started = self.frame_stats.enabled().then(Instant::now);
         let camera = self.camera;
         let pane = self.pane_size(window);
         let visible = camera
@@ -1391,28 +1552,7 @@ impl Render for CanvasView {
             .dilated(CULL_MARGIN_PX / camera.zoom);
         let theme = cx.peek_theme().clone();
 
-        // Cloned so the per-kind bodies below can take `&mut App`: `Entity::read` borrows it.
-        let nodes = self.document.read(cx).nodes().to_vec();
-        let selection = self.document.read(cx).selected().clone();
-        self.node_states.retain_live(&nodes, cx);
-        self.reclaim_focus(window, cx);
-
-        let mut items = Vec::new();
-        let mut selected_rects = Vec::new();
-        for node in &nodes {
-            let world = node.bounds();
-            if !world.intersects(visible) {
-                continue;
-            }
-            let selected = selection.contains(&node.id);
-            if selected {
-                selected_rects.push(world);
-            }
-            items.push(NodeItem {
-                world,
-                element: self.node_element(node, selected, window, cx),
-            });
-        }
+        let (items, selected_rects) = self.node_items(visible, window, cx);
 
         let overlay = Overlay {
             edges: self.edge_items(visible, cx),
@@ -1430,7 +1570,7 @@ impl Render for CanvasView {
         let canvas = CanvasElement::new(cx.entity(), camera, window.rem_size(), items, overlay)
             .cursor(self.cursor());
 
-        div()
+        let element = div()
             .id("canvas")
             .test_support()
             .relative()
@@ -1468,7 +1608,10 @@ impl Render for CanvasView {
             .on_action(cx.listener(Self::select_node_right))
             .on_action(cx.listener(Self::select_node_up))
             .on_action(cx.listener(Self::select_node_down))
-            .on_action(cx.listener(Self::focus_query))
+            .on_action(cx.listener(Self::focus_query));
+        let element = dispatch::register(element, cx);
+        let element = page_search::register(element, cx);
+        let element = element
             .on_key_down(cx.listener(Self::on_key_down))
             .on_key_up(cx.listener(Self::on_key_up))
             .child(div().absolute().inset_0().child(canvas))
@@ -1482,6 +1625,12 @@ impl Render for CanvasView {
                     .as_ref()
                     .map(|jump| jump::render(jump, camera, cx)),
             )
+            .children(page_search::render(self, cx));
+
+        if let Some(started) = started {
+            self.frame_stats.record(Phase::Render, started.elapsed());
+        }
+        element
     }
 }
 

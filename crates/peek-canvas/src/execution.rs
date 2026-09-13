@@ -169,13 +169,35 @@ impl Document {
     ///
     /// The edge runs **error → query**, the opposite direction from a result: the error is
     /// commentary on the query rather than something the query feeds.
-    pub fn place_query_error(&mut self, source: &NodeId, query: &str, message: &str) -> NodeId {
+    ///
+    /// Returns the node's id and whether it was newly created, like [`Document::place_result`]:
+    /// a run frames what it created, and refreshing the error already on screen created nothing.
+    pub fn place_query_error(
+        &mut self,
+        source: &NodeId,
+        query: &str,
+        message: &str,
+    ) -> (NodeId, bool) {
         let id = NodeId::error_of(source);
+        let existed = self.node(&id).is_some();
         let placed = id.clone();
         self.transaction_of(EditKind::Structure, |document| {
             document.place_query_error_inner(source, query, (placed, message));
         });
-        id
+        (id, !existed)
+    }
+
+    /// `focusCreated` in `executeQueries.ts`: a finished run selects the nodes it created and
+    /// asks the view to frame exactly them.
+    ///
+    /// Nothing created means nothing moves — a re-run that refreshed the result already on
+    /// screen leaves both the selection and the camera where the user left them.
+    pub fn focus_created(&mut self, created: Vec<NodeId>) {
+        if created.is_empty() {
+            return;
+        }
+        self.request_framing(created.clone());
+        self.select_only(created);
     }
 
     fn place_query_error_inner(&mut self, source: &NodeId, query: &str, placed: (NodeId, &str)) {
@@ -391,7 +413,8 @@ mod tests {
     #[test]
     fn an_error_node_is_connected_backwards_into_its_query() {
         let (mut document, query) = with_query();
-        let error = document.place_query_error(&query, "select boom", "syntax error");
+        let (error, created) = document.place_query_error(&query, "select boom", "syntax error");
+        assert!(created, "the first failure creates the node");
         assert!(
             document
                 .edges()
@@ -409,8 +432,9 @@ mod tests {
         let (mut document, query) = with_query();
         document.place_query_error(&query, "q", "first");
         let count = document.nodes().len();
-        let error = document.place_query_error(&query, "q", "second");
+        let (error, created) = document.place_query_error(&query, "q", "second");
         assert_eq!(document.nodes().len(), count);
+        assert!(!created, "refreshing it creates nothing to fly to");
         let data = peek_document::ErrorData::get(&document.node(&error).unwrap().kind).unwrap();
         assert_eq!(data.message, "second");
     }
@@ -418,9 +442,32 @@ mod tests {
     #[test]
     fn a_successful_run_clears_the_error_from_the_last_one() {
         let (mut document, query) = with_query();
-        let error = document.place_query_error(&query, "q", "boom");
+        let (error, _) = document.place_query_error(&query, "q", "boom");
         document.place_result(&query, ("q", 0), rows(&[("n", "INT4")], 1));
         assert!(document.node(&error).is_none());
+    }
+
+    /// `focusCreated`: the nodes a run created are selected and handed to the camera. A re-run
+    /// that only refreshed what was already there creates nothing, and so moves nothing.
+    #[test]
+    fn a_finished_run_selects_and_frames_only_what_it_created() {
+        let (mut document, query) = with_query();
+        let (result, created) = document.place_result(&query, ("q", 0), rows(&[("n", "INT4")], 1));
+        assert!(created);
+
+        document.focus_created(vec![result.clone()]);
+        assert_eq!(
+            document.selected().iter().collect::<Vec<_>>(),
+            vec![&result]
+        );
+        assert_eq!(document.take_framing(), vec![result]);
+        assert!(
+            document.take_framing().is_empty(),
+            "the request is drained, so the camera does not fly twice"
+        );
+
+        document.focus_created(Vec::new());
+        assert!(document.take_framing().is_empty());
     }
 
     /// Placing a result is one undo step, not four (insert, connect, data, clear-error).

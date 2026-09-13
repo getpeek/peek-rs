@@ -12,8 +12,14 @@ Decisions taken with the user, plus reasoning that is not visible in the code.
   brought over; lsp/mcp/acp/db/ssh/import/multiplayer come with the node that needs them.
 - **Nodes are real elements scaled through rem size**, not custom-painted. Keeps native inputs,
   tables, scrolling and hit-testing; the trade-off is hairline borders that do not scale (a
-  feature). They stay full element trees at every zoom: the placeholder LOD below zoom 0.25 was
-  inherited from the browser renderer, which slowed down when zoomed out, and gpui does not.
+  feature).
+- **Nodes stop drawing their bodies below zoom 0.32**, which reverses an earlier decision here
+  that the placeholder LOD was "a limit of the browser renderer, not of gpui". That was an
+  assumption, and it was wrong: the cost is in building and laying out the element trees, which
+  no renderer avoids, and culling works against you when zooming out because more cards fit the
+  screen the further back you go. Measured on a page of 24 result nodes, a pinch from 100 % to
+  10 % cost 39.5 ms a frame; removing the per-frame waste took it to 30.8, and not building
+  unreadable bodies took it to 14.3. See `peek-canvas/src/lod.rs` and `docs/canvas.md`.
 - **Strict lints, verbatim from the Tauri workspace.** Item-level allows with reasons only.
   Clippy's `wildcard_imports` means `use gpui_kit::prelude::*;` plus explicit type imports
   instead of the docs' `use gpui_kit::*;`.

@@ -15,6 +15,7 @@ use peek_canvas::{Camera, Document};
 use peek_config::{PeekConfig, PersistenceMode};
 
 use crate::database::Database;
+use crate::settings::Settings;
 use peek_document::{
     CanvasDocument, DocumentFile, DocumentStore, ResultSet, ResultSidecar, ResultsFile,
 };
@@ -22,11 +23,12 @@ use peek_document::{
 use crate::Launch;
 use crate::autosave::Autosave;
 use crate::canvas::CanvasView;
-use crate::commands::{self, COMMANDS, actions};
+use crate::commands::{self, actions, palette::PaletteEntry};
 use crate::mcp::McpBridge;
 use crate::title_bar::PeekTitleBar;
-use crate::title_bar::connection::{self, Choice, ConnectionPicker};
+use crate::title_bar::connection::ConnectionPill;
 use crate::title_bar::pages::PageTabs;
+use crate::title_bar::picker::{PickerEvent, PickerView};
 
 pub struct WorkspaceView {
     title: SharedString,
@@ -34,15 +36,15 @@ pub struct WorkspaceView {
     /// Empty for [`WorkspaceView::with_document`], which is handed a document rather than a name.
     workspace: String,
     connection: String,
-    /// What the picker offers, snapshotted from `settings.json` at startup. The reference reads
-    /// its config once too, and rendering must not touch the disk.
-    connections: Rc<[Choice]>,
     /// The same snapshot, unflattened: switching needs the url and ssh tunnel behind a choice,
     /// which `Choice` deliberately does not carry into the title bar.
     config: Rc<PeekConfig>,
     canvas: Entity<CanvasView>,
     canvas_focus: FocusHandle,
     palette: Entity<CommandState>,
+    /// The connection picker's panel. Retained rather than rebuilt per open, as the palette and
+    /// the theme picker are, so its search text and cursor survive a repaint.
+    picker: Entity<PickerView>,
     theme_picker: Entity<CommandState>,
     page_tabs: Entity<PageTabs>,
     persistence: PersistenceMode,
@@ -51,6 +53,12 @@ pub struct WorkspaceView {
     /// task, so without this the pill, `Scope::connected` and the Run button all keep rendering
     /// whatever was true at the last unrelated repaint.
     _database: Subscription,
+    /// Repaints when `settings.json` changes under the app — a connection added or renamed in
+    /// the picker, or a preference flipped by a command. Without it the pill and the panel keep
+    /// rendering the config as it was when the window opened.
+    _settings: Subscription,
+    /// The picker's switch requests.
+    _switches: Subscription,
     /// Only present when this run may write; its absence is what makes read-only safe.
     autosave: Option<Entity<Autosave>>,
     /// The MCP server an agent drives the canvas through. `None` unless `ai.mcp.enable` is set,
@@ -83,8 +91,10 @@ impl WorkspaceView {
         view.persistence = launch.persistence;
         view.workspace = workspace;
         view.connection = connection;
-        view.connections = connection::choices(&config);
         view.config = config;
+        let current = (view.workspace.clone(), view.connection.clone());
+        view.picker
+            .update(cx, |picker, _| picker.set_current(&current.0, &current.1));
         view.adopt_results(loaded.results, cx);
         connect_to(&view.config, &view.workspace, &view.connection, cx);
         view.autosave = Self::autosave_for(
@@ -133,6 +143,12 @@ impl WorkspaceView {
         let canvas = cx.new(|cx| CanvasView::new(document, canvas_focus.clone(), window, cx));
         let page_tabs = cx.new(|cx| PageTabs::new(canvas.clone(), canvas_focus.clone(), cx));
         let palette = cx.new(|cx| CommandState::new(window, cx));
+        // Weak, and taken before the view exists: the picker points back at the workspace it
+        // switches, and a strong handle would be a cycle that never drops.
+        let picker = cx.new(|_| PickerView::new());
+        // The panel asks rather than reaches: switching from inside its own update would be a
+        // re-entrant borrow of this view, which gpui turns into a panic.
+        let switches = cx.subscribe_in(&picker, window, Self::on_picker_event);
         let theme_picker = cx.new(|cx| CommandState::new(window, cx));
         window.focus(&canvas_focus, cx);
 
@@ -140,16 +156,18 @@ impl WorkspaceView {
             title,
             workspace: String::new(),
             connection: String::new(),
-            connections: Rc::from([]),
             config: Rc::new(PeekConfig::default()),
             canvas,
             canvas_focus,
             page_tabs,
             palette,
+            picker,
             theme_picker,
             persistence: PersistenceMode::ReadOnly,
             ui_visible: true,
             _database: cx.observe_global::<Database>(|_, cx| cx.notify()),
+            _settings: cx.observe_global::<Settings>(|_, cx| cx.notify()),
+            _switches: switches,
             autosave: None,
             mcp: None,
         }
@@ -208,6 +226,9 @@ impl WorkspaceView {
         self.title = SharedString::from(format!("{workspace} / {connection}"));
         self.workspace = workspace;
         self.connection = connection;
+        let current = (self.workspace.clone(), self.connection.clone());
+        self.picker
+            .update(cx, |picker, _| picker.set_current(&current.0, &current.1));
         // The database follows the document. Without this the previous connection stays open and
         // its schema keeps answering completions for a database that is no longer on screen.
         let config = Rc::clone(&self.config);
@@ -319,6 +340,88 @@ impl WorkspaceView {
         crate::theme_picker::open(&self.theme_picker, self.persistence, window, cx);
     }
 
+    /// What the picker asks for. Every arm is about the *open* connection: the panel has
+    /// already written `settings.json` and moved any files, and what it cannot know is whether
+    /// the thing it changed is the one this window is looking at.
+    fn on_picker_event(
+        &mut self,
+        _: &Entity<PickerView>,
+        event: &PickerEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            PickerEvent::Switch {
+                workspace,
+                connection,
+            } => self.switch_connection(workspace.clone(), connection.clone(), window, cx),
+            PickerEvent::Renamed {
+                workspace,
+                from,
+                to,
+            } => {
+                // The canvas has already moved on disk; reopening under the new name is what
+                // repoints the autosave handles, which captured absolute paths at load.
+                if self.is_open(workspace, from) {
+                    self.switch_connection(workspace.clone(), to.clone(), window, cx);
+                }
+            }
+            PickerEvent::Removed {
+                workspace,
+                connection,
+            } => {
+                if self.is_open(workspace, connection) {
+                    self.fall_back(window, cx);
+                }
+            }
+            PickerEvent::WorkspaceRenamed { from, to } => {
+                // Only when it is *this* window's workspace that moved. Comparing against the
+                // new name instead would make renaming any other workspace drag this one over.
+                if self.workspace.eq_ignore_ascii_case(from) {
+                    let connection = self.connection.clone();
+                    self.switch_connection(to.clone(), connection, window, cx);
+                }
+            }
+            PickerEvent::WorkspaceRemoved { name } => {
+                if self.workspace.eq_ignore_ascii_case(name) {
+                    self.fall_back(window, cx);
+                }
+            }
+        }
+    }
+
+    fn is_open(&self, workspace: &str, connection: &str) -> bool {
+        self.workspace.eq_ignore_ascii_case(workspace)
+            && self.connection.eq_ignore_ascii_case(connection)
+    }
+
+    /// The connection this window was showing is no longer configured. Move to the first one
+    /// that still is; with none left the pill falls back to saying so.
+    fn fall_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let first = Settings::get(cx).workspaces.iter().find_map(|workspace| {
+            let connection = workspace.connections.first()?;
+            Some((workspace.name.clone(), connection.name.clone()))
+        });
+        let Some((workspace, connection)) = first else {
+            self.workspace = String::new();
+            self.connection = String::new();
+            self.title = SharedString::from("Peek");
+            cx.notify();
+            return;
+        };
+        self.switch_connection(workspace, connection, window, cx);
+    }
+
+    fn open_connection_picker(
+        &mut self,
+        _: &actions::connection_picker::Open,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.picker
+            .update(cx, |picker, cx| picker.toggle(window, cx));
+    }
+
     fn open_palette(
         &mut self,
         _: &actions::command_palette::Open,
@@ -327,11 +430,8 @@ impl WorkspaceView {
     ) {
         let scope = self.canvas.read(cx).scope(cx);
         log::debug!("peek: opening palette with scope {scope:?}");
-        let available: Vec<&'static commands::Command> = COMMANDS
-            .iter()
-            .filter(|command| command.id != "CommandPalette::Open")
-            .filter(|command| (command.available)(&scope))
-            .collect();
+        let document = self.document(cx);
+        let available: Vec<PaletteEntry> = commands::palette::entries(document.read(cx), &scope);
         let state = self.palette.clone();
         let focus = self.canvas_focus.clone();
 
@@ -342,10 +442,10 @@ impl WorkspaceView {
             let state = state.clone();
             dialog.overlay_closable(true).content(move |content, _, _| {
                 let focus = focus.clone();
-                let items = available.iter().map(|command| {
+                let items = available.iter().map(|entry| {
                     CommandItem::new()
-                        .label(command.title)
-                        .keywords(command.keywords.split_whitespace().map(str::to_owned))
+                        .label(entry.title.clone())
+                        .keywords(entry.keywords.split_whitespace().map(str::to_owned))
                 });
                 let confirmed = available.clone();
                 content.child(
@@ -353,8 +453,8 @@ impl WorkspaceView {
                         .items(items)
                         .on_confirm(move |path, window, cx| {
                             window.close_dialog(cx);
-                            if let Some(command) = confirmed.get(path.row) {
-                                focus.dispatch_action(&*(command.build)(), window, cx);
+                            if let Some(entry) = confirmed.get(path.row) {
+                                focus.dispatch_action(&*entry.action, window, cx);
                             }
                         })
                         .on_cancel(WindowExt::close_dialog),
@@ -531,24 +631,28 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::toggle_ui))
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::open_theme_picker))
+            .on_action(cx.listener(Self::open_connection_picker))
             // The canvas fills the window and the bar floats over it, as the reference does.
             // Order matters twice over: the bar must paint above the canvas, and its hitbox
             // must be inserted *after* the canvas' so `occlude()` can block it — without that
             // a click on a page tab also reaches the canvas and starts a marquee.
             .child(div().absolute().inset_0().child(self.canvas.clone()))
             .when(self.ui_visible, |this| {
-                let picker = ConnectionPicker::new(
-                    cx.entity(),
+                let pill = ConnectionPill::new(
                     (
                         SharedString::from(self.workspace.clone()),
                         SharedString::from(self.connection.clone()),
                     ),
-                    self.connections.clone(),
+                    self.picker.read(cx).is_open(),
+                    self.canvas_focus.clone(),
                 );
                 this.child(div().absolute().top_0().left_0().right_0().occlude().child(
-                    PeekTitleBar::new(picker, self.page_tabs.clone(), self.canvas_focus.clone()),
+                    PeekTitleBar::new(pill, self.page_tabs.clone(), self.canvas_focus.clone()),
                 ))
             })
+            // After the bar, so the scrim occludes the page tabs too, and before the dialog
+            // layer, so a palette opened over the picker still wins.
+            .when(self.ui_visible, |this| this.child(self.picker.clone()))
             // `Root` owns dialogs, sheets and notifications but leaves mounting them to the
             // window's first view, so the palette dialog is rendered here.
             .children(Root::render_dialog_layer(window, cx))

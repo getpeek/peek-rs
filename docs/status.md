@@ -16,7 +16,71 @@ Last updated: 2026-09-13.
 
 Canvas features that slot in between milestones and are not started: regions and wayfinding
 (the model and its mutations landed with M6's tools, but nothing draws them yet), minimap,
-page search, page tabs in the title bar.
+the history panel, and the Activity node's running-query list.
+
+## The command palette port
+
+The reference's ~40 palette commands are ported. The registry went from 38 entries to 55,
+split one file per group under `commands/registry/` — a single array was a merge conflict
+every time two features landed at once. New in this batch: `Query::{RerunAll,RerunSelected}`,
+`Export::{Csv,Json}`, `Page::{GoTo,OpenPicker,SelectPreviousQuery,SelectNextQuery}`,
+`Page::Search` (now page-wide, not just in-result), `Result::Pivot`,
+`View::{Organize,Schema}`, `Zoom::FitSelectionAndLock`, `Edit::{Cut,Paste}` and a canvas-level
+`Edit::Copy`, `Settings::{TogglePageDisplay,ToggleCommandPaletteButton}`, `Help::Keymap`,
+`App::About`, `ConnectionPicker::Open`.
+
+Deliberate divergences from the reference, each for a stated reason:
+
+- **Export writes a header-only CSV / `[]` for an empty result.** The reference's `toCsv`/`toJson`
+  read `result[0]` and throw. Divergence in the safe direction.
+- **The CSV header is joined unquoted**, matching the reference, so a column named `a;b` produces
+  broken CSV. Kept on purpose: byte-identical exports between the two apps beat a silent local
+  fix, for the same reason the on-disk formats are frozen.
+- **Export filenames are always the SQL slug.** The reference optionally asks Ollama for a nicer
+  name; an export never waits on a model that may not be running.
+- **Rerun walks queries left-to-right by x**, where the reference uses React Flow insertion
+  order. That order is not a decision there — it is `rf.getNodes()`'s array order surfacing — and
+  it is unstable: delete a query, re-add it, and the page reruns in a different sequence with no
+  visible cause. Since runs are staggered rather than concurrent, the order is observable, so a
+  predictable one wins. **It is a visual ordering, not a dependency ordering**: queries that feed
+  each other through variable nodes are not sequenced by it, and two queries at the same x resolve
+  by `total_cmp` — deterministic but arbitrary. Nothing in the rerun path depends on ordering for
+  correctness today; if sequencing ever becomes load-bearing, x position is the wrong input.
+- **The schema page is laid out once and stops.** A tick is a document mutation, so a perpetual
+  simulation means autosave never quiesces and the undo coalescing window never closes.
+  Schema edges are persisted, which *is* the reference's shape — `edgesAtom`'s setter writes into
+  `doc.pages[…].edges`.
+- **One key, two meanings, chosen by focus.** `Edit::Copy` is a single action on
+  `CANVAS_NOT_TYPING`: the canvas copies the selected nodes, and a focused result table copies
+  its cells as TSV instead, winning on depth.
+  `copying_in_a_focused_result_does_not_also_copy_the_node` pins it — and carries a positive
+  control, because "no node was pasted" would otherwise pass just as well if pasting were broken.
+  Switching the canvas handler to `capture_action` (root-to-leaf) makes it fail, which is the
+  regression it exists to catch.
+- **`⌘F` has no dead zone.** The reference arbitrates it with two listeners whose guards
+  (`selected && !pivoted`, and `nothing selected`) are not complementary, so a selected pivoted
+  result leaves the key doing nothing. Here the discriminator is focus, so exactly one handler
+  always runs.
+- **The keymap modal derives its rows from the registry** rather than a hand-kept list. The
+  reference duplicates its descriptions from markdown and has already drifted — `Page::OpenPicker`
+  is in its `keymap.rs` and in-app help but missing from its `docs/keymap.md`.
+
+Two honest gaps in the batch's own testing, recorded rather than papered over:
+
+- **`window.refresh()` in the settings toggles is temporary**, standing in for an
+  `observe_global::<Settings>` subscription on `WorkspaceView`. Its repaint has **no test**:
+  removing the call leaves the toggle test passing, because the headless harness re-renders every
+  frame regardless. A test that cannot fail is worse than none, so this is a note instead of one.
+- **The connection picker's write paths are unit-tested but not driven end to end**, because
+  making `WorkspaceView::with_document` writable in a test would aim `DocumentStore` at the real
+  `~/peek`. Threading a base directory through the view is the fix, whenever a second consumer
+  wants it.
+
+Not ported, each blocked on a feature rather than on the command: the region commands (group,
+ungroup, the two AI groupings, the regions toggle), the minimap toggle, "Show running queries",
+"Show history", host/join session, automatic query labels, and `Tool::LassoSelect` — which is a
+freehand selection tool, not a command. Registering any of them would put a row in the palette
+that does nothing.
 
 ### M5, in pieces
 
@@ -393,9 +457,41 @@ while locked, which leaves no visible way to lock — here it closes the cluster
 
 The title bar's connection pill is tinted by the connection's own `color` from `settings.json`,
 parsed by `peek_config::DatabaseConnection::rgb` (hex and `hsl()`, the two forms the apps write).
-The workspace list is snapshotted once at startup, as the reference's `useGetConfig` does, so a
-connection added in the TypeScript app needs a restart to appear — and rendering the pill never
-touches the disk.
+It is a trigger, not a menu: it dispatches `ConnectionPicker::Open` through the canvas focus
+handle, the same action bare `p` is bound to, and holds a deeper fill while its panel is up.
+
+**The picker is a hand-owned panel** (`title_bar/picker/`), anchored under the pill at the
+reference's own 460 px with a full-window transparent scrim behind it. Not `DropdownMenu`, which
+has no controlled `open`; and not `Popover`, which *does* — the earlier note here was wrong about
+that — but whose `appearance(false)` also disables outside-click dismissal and whose `trigger`
+forces `Selectable` onto a pill that already hand-builds its hover surface. Owning it outright
+also gives every row a `test_support` id, which a `PopupMenu` never had.
+
+What it does, all of it ported from `WorkspaceList.tsx` and `WorkspacePopover.tsx`: fuzzy search
+across five keys (workspace, connection, user, host, database, so typing a workspace surfaces its
+connections), a cursor the arrow keys walk with Enter to switch, collapsible workspace groups that
+auto-expand when the cursor enters them, the `SSH` badge, the `user@host` line, per-character
+match underlines in the connection's own tint, and push-navigation into forms for adding, editing
+and removing both connections and workspaces.
+
+Three deliberate differences. **Rows are gathered under their workspace in cursor order**, so the
+sequence read top to bottom is the sequence Enter walks — the reference groups for display but
+keeps a flat score-ordered cursor, so its arrow keys can jump around the panel. **Renaming moves
+the canvas**: a connection's document is keyed by name, and `DocumentStore::rename` moves it and
+its rows sidecar before the config commit, where the reference orphans both. And the per-row "…"
+popup is **inline hover buttons** instead, because a menu there is an overlay opened from inside
+an overlay, and the reference's menu items only open the same form anyway.
+
+Removing a connection takes only its `settings.json` entry; the canvas stays on disk, so re-adding
+the name gets it back. Every write is gated on `PersistenceMode` — without `--write` the forms
+open but Save and Duplicate are disabled and say why. `Session::probe` backs a Test button the
+reference has no equivalent for: it opens a throwaway connection without locking the live session's
+`Inner`, and forces `local_port: 0` so probing a tunnelled connection cannot collide with the live
+tunnel's fixed port.
+
+The workspace list is no longer snapshotted at startup. `Settings` is a gpui global and
+`WorkspaceView` observes it, so a connection added in the picker appears in the pill immediately —
+one added by the TypeScript app still needs a restart, since nothing watches the file.
 
 The window minimum is 760 × 480 rather than the old 640 × 400: the bottom chrome is two panels,
 one pinned left and one centred, and below about 750 px the centred one runs into the other.
@@ -458,8 +554,60 @@ sources. Nothing in that harness reads rendered pixels, so these are open until 
 - **Tooltips at high zoom**, which lay out at rem 1 and so do not scale with the node.
 - **BarChart with two series**, the case that motivated the hand-composed plot.
 
+## Canvas frame cost
+
+Zooming out over result nodes used to drop frames. Four costs were being paid per visible result
+node per frame, and one by every node with text:
+
+1. `result::body` deep-cloned the whole `ResultSet` — every `Cell::Text` string, every
+   `Cell::Json` tree — and `ResultDelegate::adopt` then deep-compared it to answer "unchanged".
+   The sidecar now holds `Arc<ResultSet>`, so the clone is a refcount bump and the steady-state
+   comparison is `Arc::ptr_eq`. The delegate's second full copy went away with it. The value
+   comparison is still there, but only behind a pointer miss, i.e. once per query run rather
+   than once per frame — a **live** query re-runs every ten seconds and usually gets identical
+   rows back, and treating that as a new result would drop the user's selection twice a minute.
+2. The toolbar asked "can this result be written to?" on every frame, and the answer came from a
+   fresh tree-sitter parse (`Parser::new` + `set_language` + a tree walk). It is now cached
+   beside the table badges, in the branch that already recomputed only when the SQL changed.
+3. Any change in zoom counted as a layout change, so `ColumnWidths::resolve` re-measured 30 rows
+   of every column, and the schema roles were reclassified, for widths that are **world** units
+   and cannot move when the camera does. `adopt` now reports rows, widths and scale separately.
+4. `CanvasView::render` cloned every node on the page — including each agent node's whole message
+   history — before culling. It culls first now, and prunes node state only when the document
+   revision moved rather than by an O(states × nodes) scan every frame. Edge endpoints resolve
+   through a per-frame index instead of two linear scans per edge.
+5. Every visible string was re-shaped every frame, because gpui keys its line-layout and glyph
+   caches on the exact font size. `peek_canvas::render_scale` snaps the content scale to a
+   ladder; see `docs/canvas.md`, "Node zoom strategy".
+
+Then `peek_canvas::lod` stops building bodies below zoom 0.32 at all.
+
+`cargo test -p peek-ui --test frame_cost --release -- --ignored --nocapture` measures it: 24
+result nodes of 2,000 × 8 cells, pinched from 100 % to 10 %. **39.5 ms a frame before, 30.8 after
+items 1–4, 14.3 with LOD on top.** A pinch *into* the readable range went 9.3 → 7.5 ms.
+
+**That benchmark cannot see item 5.** `TestPlatform` installs a `NoopTextSystem`, so a headless
+frame shapes no text and rasterises no glyphs — the entire cost `render_scale` exists to remove
+is absent from the harness, and disabling the snapping changes the headless number by nothing.
+The evidence for it is the cache keys themselves (`RenderGlyphParams` and
+`line_layout::CacheKey` both carry `font_size`, and `TextSystem::raster_bounds` is an unbounded
+map that is never cleared), and confirming it needs the real app under `PEEK_FRAME_STATS=1`.
+
+Deliberately left alone: `paint_dot_grid` emits one quad per dot but `grid_step` keeps them
+≥ 12 px apart, which caps it near 11k quads for a full-screen pane; and the ~26 `on_action`
+listeners, the HUD and the toolbar are rebuilt every frame, which is cheap next to the above.
+
 ## Known gaps and quirks
 
+- **The picker's write paths are not driven end to end.** Saving a form, renaming a connection
+  and removing one are unit-tested where the logic lives — `peek_config::workspaces` (the
+  mutation API and its duplicate-name refusals) and `DocumentStore::rename` (moving the document
+  and its sidecar, refusing an occupied target) — but no `#[gpui_kit::test]` clicks Save and
+  watches a file move. `WorkspaceView::with_document` is `ReadOnly` by construction, and making
+  it writable in a test would point `DocumentStore` at the real `~/peek`; doing this properly
+  means threading a base directory through the view, which is worth doing when something else
+  needs it. What the headless tests do cover is that the gate holds: Save and Duplicate change
+  nothing under `ReadOnly`.
 - Two kinds still show the placeholder body: `ResultInsertForm` and Activity.
 - **The agent node talks to a real agent.** `a` or the toolbar places one; it streams an ACP
   session (Claude Code by default) or a local Ollama model, renders thoughts, plans, tool
@@ -525,16 +673,9 @@ sources. Nothing in that harness reads rendered pixels, so these are open until 
   types `)` elsewhere would need gpui's `key_equivalents`, which Peek does not use yet.
 - Mouse-wheel (non-trackpad) viewport commits use a 140 ms quiet-period timer.
 - The title bar carries the page tabs and the connection picker; no collaborate button yet.
-  **The picker has no keyboard trigger.** The reference binds bare `p` to `ConnectionPicker::Open`
-  (the id is reserved in `settings.schema.json`), but gpui-component's `DropdownMenu` exposes only
-  `on_open_change`, not a controlled `open`, so a keystroke cannot open it. Doing so means owning a
-  `Popover` and its `PopupMenu` by hand, at which point the command registry entry can land too.
-- **Switching connections does not reconnect the database.** It reloads the document, its pages,
-  its rows sidecar and its autosave, but `connect_to` is only called at startup, so the session
-  keeps talking to the connection it opened then — queries run against the wrong database and the
-  schema behind completions is stale. `WorkspaceView::switch_connection` needs the same
-  `Database::connect` call `new` makes.
-- No FPS overlay (`gpui-fps` is not a published crate for this gpui-pre version).
+- No FPS overlay (`gpui-fps` is not a published crate for this gpui-pre version). `PEEK_FRAME_STATS=1`
+  is the substitute: `canvas/frame_stats.rs` logs mean and p95 for render, prepaint and paint
+  every 60 frames, with the visible and total node counts. See "Canvas frame cost" below.
 - Fonts: the theme names "Monaspace Krypton" and relies on it being installed; bundling the OTFs
   via `cx.text_system().add_fonts` is deferred.
 - A user keymap entry naming a command id not yet in the registry (e.g. `Page::New`) is logged and

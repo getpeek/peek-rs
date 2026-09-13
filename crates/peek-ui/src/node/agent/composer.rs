@@ -6,8 +6,10 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::{Disableable, Icon, StyledExt};
 use gpui_kit::prelude::*;
-use gpui_kit::{AnyElement, Context, Focusable, Window, div, px, rems};
+use gpui_kit::{AnyElement, Context, Focusable, Window, div, rems};
 use peek_theme::ActivePeekTheme;
+
+use crate::node::{TextInsetExt, scaled};
 
 use super::view::AgentView;
 
@@ -43,10 +45,24 @@ pub(super) fn render(
             }
         })
         .child(
+            // The box is drawn here rather than by the textarea, whose own frame would sit a
+            // fixed number of screen pixels away from the text and paint outside itself once
+            // `scaled_text_inset` pulls the frame back onto the camera.
             div()
                 .flex_1()
                 .min_w_0()
-                .child(Textarea::new(view.composer()).disabled(loading)),
+                .bg(theme.node_inset)
+                .border_1()
+                .border_color(theme.node_border)
+                .rounded(scaled(theme.radius_card))
+                .child(
+                    Textarea::new(view.composer())
+                        .disabled(loading)
+                        .appearance(false)
+                        .bordered(false)
+                        .text_size(rems(0.78125))
+                        .scaled_text_inset(window),
+                ),
         )
         .child(button(loading, empty, window, cx))
         .into_any_element()
@@ -71,9 +87,9 @@ fn button(
         .primary()
         .when(loading, ButtonVariants::danger)
         .disabled(!loading && empty)
-        .size(px(30.0))
+        .size(rems(1.875))
         .tooltip(tooltip)
-        .child(Icon::new(icon).size(px(16.0)))
+        .child(Icon::new(icon).size(rems(1.0)))
         .on_click(cx.listener(move |view, _, window, cx| {
             if loading {
                 view.stop(cx);

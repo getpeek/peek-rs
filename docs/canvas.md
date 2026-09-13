@@ -192,15 +192,35 @@ nothing to undo.
 
 gpui has no transform groups (zed-industries/zed#53303), so nodes cannot be scaled as a subtree.
 Instead each node is a **real gpui element tree** placed at camera-derived screen coordinates and
-laid out inside `window.with_rem_size(Some(base_rem * zoom))`. Everything in the shell is
+laid out inside `window.with_rem_size(Some(base_rem * scale))`. Everything in the shell is
 rem-based, so text, padding and radii scale with the camera while borders stay one physical
 pixel. Hit-testing works unchanged because element hitboxes are already in screen space.
 Zed's `crates/ui/src/utils/with_rem_size.rs` is the precedent.
 
-Nodes render as full element trees at every zoom, and so does the grid: the placeholder level of
-detail that painted flat quads below zoom 0.25 was a limit of the browser renderer, not of gpui,
-and culling against the visible rect already bounds the work. `grid::grid_step` doubles the world
-gap until dots are ≥ 12 px apart, so the grid thins out instead of turning into noise.
+**A node's box uses the camera's zoom; its contents use a snapped `scale`.** `peek_canvas::
+render_scale` rounds the zoom to a ladder of twelve rungs per octave, anchored on 1.0, and that
+is what feeds both the rem scope and `NodeContext::zoom`. gpui keys its line-layout cache and
+its glyph rasteriser on the exact font size (`RenderGlyphParams`, `line_layout::CacheKey`), so a
+zoom that moves continuously misses both caches for every visible string on every frame and
+re-shapes the whole viewport; the cache for rasterised bounds is not even bounded. Snapping
+turns that into a hit on every frame that does not cross a rung. The cost is that type inside a
+card can sit up to ~3 % off the card around it, which is below what the eye resolves — and
+positions, edges, hit testing and the selection ring all still use the exact zoom, so nothing
+drifts relative to anything else.
+
+**Below `lod::REDUCE_BELOW` (0.32) a node draws its shell and no body**, coming back at
+`RESTORE_ABOVE` (0.38); the gap is hysteresis, so a slow zoom crosses once instead of rebuilding
+every visible body twice a frame. Culling bounds the work only while nodes leave the viewport,
+and zooming out does the reverse — more cards fit the screen the further back the camera goes —
+so past the point where a body is readable, building it is pure cost. Exempt: a selected node,
+the bare kinds (Text and Draw have no shell, so reducing them would make them vanish), and every
+node while focus sits anywhere but the canvas, which means an editor owns it. A reduced node is
+also not allowed to *create* retained state, so zooming out over a page of query nodes does not
+open a language-server document for each one. The reference draws the same line at 0.35
+(`wayfinding/crossFade.ts`), where it stops dimming nodes and hands the board to region beacons.
+
+The grid thins the same way: `grid::grid_step` doubles the world gap until dots are ≥ 12 px
+apart, so it fades out instead of turning into noise.
 
 **The rem scope scales rem-based sizes, not raw geometry.** Anything painted in pixels inside a
 node — a `gpui::Path`, a quad, a `canvas()` element — is unaffected by `with_rem_size` and must

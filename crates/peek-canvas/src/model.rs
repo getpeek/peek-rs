@@ -3,6 +3,7 @@
 //! it). Mirrors the subset of the TypeScript `CanvasApi` that milestones 1–2 need.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::Instant;
 
 use peek_document::geometry::{Point, Rect, Size};
@@ -71,6 +72,10 @@ pub struct Document {
     /// in their own file: one counter would make every query re-write the document and every
     /// document edit re-write megabytes of rows.
     results_revision: u64,
+    /// Nodes a finished run asked the view to frame, drained by the canvas the next time the
+    /// document notifies. Session state, like the selections: a camera flight is neither an
+    /// undo step nor anything the file records.
+    framing: Vec<NodeId>,
     /// Result rows, keyed by result node id.
     ///
     /// Session state, like the selections above and for the same reason: `history::Snapshot`
@@ -113,6 +118,7 @@ impl Document {
             results: ResultSidecar::default(),
             results_revision: 0,
             in_transaction: false,
+            framing: Vec::new(),
         }
     }
 
@@ -132,7 +138,7 @@ impl Document {
 
     /// The rows for a result node, or `None` until its query has run in some session.
     #[must_use]
-    pub fn result(&self, id: &NodeId) -> Option<&ResultSet> {
+    pub fn result(&self, id: &NodeId) -> Option<&Arc<ResultSet>> {
         self.results.get(id)
     }
 
@@ -145,7 +151,7 @@ impl Document {
     ///
     /// Bumps the results revision so the results autosave debounces on it, exactly as a document
     /// edit does for the document.
-    pub fn set_result(&mut self, id: NodeId, rows: ResultSet) {
+    pub fn set_result(&mut self, id: NodeId, rows: impl Into<Arc<ResultSet>>) {
         self.results.insert(id, rows);
         self.results_revision += 1;
     }
@@ -310,6 +316,23 @@ impl Document {
     #[must_use]
     pub fn content_bounds(&self) -> Option<Rect> {
         self.nodes().iter().map(Node::bounds).reduce(Rect::union)
+    }
+
+    // ---- framing (session only) --------------------------------------------------------
+
+    /// Asks the view to fly the camera so `ids` are all in frame.
+    ///
+    /// A request rather than a call because the camera needs the pane it is framing into, which
+    /// only the view knows — the same split [`crate::tools::CameraMove`] makes for the canvas
+    /// tools. The latest request wins: a second run landing before the view has drawn should
+    /// frame what it placed, not what the first one did.
+    pub fn request_framing(&mut self, ids: impl IntoIterator<Item = NodeId>) {
+        self.framing = ids.into_iter().collect();
+    }
+
+    /// Takes the pending framing request, leaving none behind.
+    pub fn take_framing(&mut self) -> Vec<NodeId> {
+        std::mem::take(&mut self.framing)
     }
 
     // ---- selection (session only) ------------------------------------------------------
@@ -582,6 +605,33 @@ impl Document {
         }))
     }
 
+    /// Adds copies of `nodes` to the active page under fresh ids, offset by `delta`, and
+    /// selects them — the paste half of `usePeekHotkeys`'s cut/copy/paste.
+    ///
+    /// One transaction, so a paste of six nodes is one undo press. The copies keep their
+    /// per-kind payload, which is the whole point: a pasted query still holds its SQL.
+    pub fn paste_nodes(&mut self, nodes: &[Node], delta: Point) -> Vec<NodeId> {
+        self.transaction(|document| {
+            let mut pasted = Vec::with_capacity(nodes.len());
+            for node in nodes {
+                // A kind this build does not know has no id prefix to mint from, and pasting
+                // it under the id it came with would collide with the node it was copied from.
+                let Some(node_type) = node.node_type() else {
+                    continue;
+                };
+                let mut copy = node.clone();
+                copy.id = NodeId::for_type(node_type);
+                copy.position = Point::new(node.position.x + delta.x, node.position.y + delta.y);
+                copy.selected = false;
+                pasted.push(copy.id.clone());
+                document.active_page_mut().nodes.push(copy);
+            }
+            document.touch();
+            document.select_only(pasted.clone());
+            pasted
+        })
+    }
+
     /// Removes the nodes and their incident edges. Returns how many existed.
     pub fn remove_nodes(&mut self, ids: &[NodeId]) -> usize {
         self.remove(ids, &[])
@@ -779,6 +829,11 @@ impl Document {
             selected_queries: kind_count(NodeType::Query),
             selected_results: kind_count(NodeType::Result),
             selected_agents: kind_count(NodeType::Agent),
+            queries: self
+                .nodes()
+                .iter()
+                .filter(|node| node.node_type() == Some(NodeType::Query))
+                .count(),
             pages: self.page_count(),
             history: HistoryScope {
                 can_undo: self.history.can_undo(self.active_page_id()),
@@ -1102,6 +1157,48 @@ mod tests {
         assert_eq!(document.revision(), 1);
     }
 
+    /// A pasted node is a new node that kept its payload. Minting the id is what stops a paste
+    /// from colliding with the node it was copied from; keeping the payload is what makes it a
+    /// paste rather than "create an empty one of the same kind".
+    #[test]
+    fn pasting_mints_ids_keeps_the_payload_and_selects_the_copies() {
+        let mut document = document();
+        let mut source = node("q1", 0.0, NodeKind::Query(QueryData::default()));
+        if let NodeKind::Query(data) = &mut source.kind {
+            data.query = "select 1".to_string();
+        }
+
+        let pasted = document.paste_nodes(&[source], Point::new(40.0, 60.0));
+
+        let copy = document.node(&pasted[0]).expect("the copy is on the page");
+        assert!(copy.id.as_str().starts_with("query_"), "{}", copy.id);
+        assert_eq!(copy.position, Point::new(40.0, 60.0));
+        let NodeKind::Query(data) = &copy.kind else {
+            panic!("a pasted query is still a query");
+        };
+        assert_eq!(data.query, "select 1");
+        assert_eq!(
+            document.selected().iter().cloned().collect::<Vec<_>>(),
+            pasted,
+            "and the paste leaves its copies selected, as the reference does"
+        );
+    }
+
+    #[test]
+    fn pasting_several_nodes_undoes_in_one_press() {
+        let mut document = document();
+        let copied = document.nodes().to_vec();
+        assert_eq!(copied.len(), 2);
+
+        document.paste_nodes(&copied, Point::new(10.0, 10.0));
+        document.checkpoint();
+        assert_eq!(document.nodes().len(), 4);
+
+        assert!(document.undo());
+        assert_eq!(document.nodes().len(), 2);
+        assert!(!document.undo(), "and the paste was the only step");
+    }
+
     #[test]
     fn creating_a_query_connects_global_variable_nodes() {
         let mut document = document();
@@ -1367,7 +1464,12 @@ mod tests {
             document.results_revision() > 0,
             "the results autosave still has to see the change"
         );
-        assert_eq!(document.result(&NodeId::from("q1-result-0")), Some(&rows));
+        assert_eq!(
+            document
+                .result(&NodeId::from("q1-result-0"))
+                .map(AsRef::as_ref),
+            Some(&rows)
+        );
     }
 
     #[test]

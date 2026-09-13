@@ -12,10 +12,12 @@ use serde::{Deserialize, Serialize};
 mod keymap;
 mod persistence;
 mod theme_id;
+mod workspaces;
 
 pub use keymap::{KeymapError, gpui_keystroke};
 pub use persistence::PersistenceMode;
 pub use theme_id::ThemeId;
+pub use workspaces::WorkspaceError;
 
 const SETTINGS_SCHEMA: &str = include_str!("./settings.schema.json");
 
@@ -65,7 +67,7 @@ pub fn config_dir() -> Result<PathBuf, ConfigError> {
     Ok(Path::new(&home).join("peek"))
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PeekConfig {
     #[serde(rename = "$schema", default = "default_schema_ref")]
     schema: String,
@@ -175,7 +177,7 @@ impl PeekConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CanvasConfig {
     /// Region grouping and wayfinding (beacons, edge peekers) on the canvas.
     #[serde(default = "CanvasConfig::default_enable_regions")]
@@ -232,13 +234,13 @@ impl Visibility {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct PagesConfig {
     #[serde(default)]
     pub show_as: PageDisplay,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct TitlebarConfig {
     #[serde(default)]
     pub command_palette_button: Visibility,
@@ -248,7 +250,7 @@ pub struct TitlebarConfig {
     pub live_query_count: Visibility,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct UiConfig {
     #[serde(default)]
     pub pages: PagesConfig,
@@ -256,7 +258,7 @@ pub struct UiConfig {
     pub titlebar: TitlebarConfig,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct McpConfig {
     /// Run the MCP server at startup. Changing this takes effect on restart.
     #[serde(default)]
@@ -294,7 +296,7 @@ pub enum AiProvider {
 
 /// The OpenAI/Ollama-compatible completion endpoint. Its presence under `ai` is what enables
 /// the AI features — absent means they're unavailable.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OllamaConfig {
     #[serde(default = "OllamaConfig::default_model")]
     pub model: String,
@@ -323,7 +325,7 @@ impl Default for OllamaConfig {
 
 /// How to spawn an ACP agent subprocess. The agent owns its own auth — pass credentials it
 /// expects (e.g. `ANTHROPIC_API_KEY`) through `env`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AcpConfig {
     #[serde(default = "AcpConfig::default_command")]
     pub command: String,
@@ -360,7 +362,7 @@ impl Default for AcpConfig {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct AiConfig {
     /// Default backend for new Agent nodes; `alias` migrates the older flat `provider` key.
     #[serde(default, alias = "provider")]
@@ -378,13 +380,13 @@ pub struct AiConfig {
     pub mcp: McpConfig,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct Workspace {
     pub name: String,
     pub connections: Vec<DatabaseConnection>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct DatabaseConnection {
     pub name: String,
     pub color: String,
@@ -392,6 +394,22 @@ pub struct DatabaseConnection {
     #[serde(default)]
     pub ssh_tunnel: Option<SshTunnelConfig>,
 }
+
+/// The six colours the reference's picker offers, as the **literal strings** `settings.json`
+/// stores, each under a stable name.
+///
+/// Two of them are `hsl(...)` and four are hex, and that spelling is preserved on purpose: a
+/// preset writes its own string back, so choosing the colour a connection already has cannot
+/// rewrite `hsl(60deg, 70%, 55%)` as `#DBDB46` and produce a spurious diff in a file the
+/// TypeScript app also reads. The names give the swatches domain-derived element ids.
+pub const CONNECTION_COLOR_PRESETS: [(&str, &str); 6] = [
+    ("blue", "#5584E8"),
+    ("yellow", "hsl(60deg, 70%, 55%)"),
+    ("orange", "hsl(20deg, 80%, 60%)"),
+    ("green", "#9FD68A"),
+    ("purple", "#C58AE8"),
+    ("red", "#E5736A"),
+];
 
 impl DatabaseConnection {
     /// The connection's tint as sRGB bytes, or `None` when the string is not one of the two forms
@@ -407,17 +425,78 @@ impl DatabaseConnection {
     }
 }
 
+/// The readable parts of a connection URL, the reference's `parseConnectionUrl`.
+///
+/// There is no `password` field, and that is the point: these parts feed the title bar, the
+/// picker's rows and the form's preview, and a struct carrying the password would put it one
+/// careless `{:?}` away from a log. A part the URL does not give is the empty string.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UrlParts {
+    pub scheme: String,
+    pub user: String,
+    /// Without the port, which is its own field so a caller can render either.
+    pub host: String,
+    pub port: Option<u16>,
+    pub database: String,
+}
+
 impl DatabaseConnection {
-    /// `user@host` from the connection URL, the reference's `parseConnectionUrl`. Deliberately
-    /// narrow: it must never surface a password, so only the part of the credentials before the
-    /// first `:` is kept.
+    /// The connection URL split for display. `None` when it has no `scheme://` at all.
+    #[must_use]
+    pub fn parts(&self) -> Option<UrlParts> {
+        parse_url(&self.url)
+    }
+
+    /// `user@host`, the picker's second line. Deliberately narrow: it must never surface a
+    /// password, so only the part of the credentials before the first `:` is kept.
     #[must_use]
     pub fn origin(&self) -> Option<String> {
-        let authority = self.url.split("://").nth(1)?.split(['/', '?']).next()?;
-        let (credentials, host) = authority.rsplit_once('@')?;
-        let user = credentials.split(':').next().unwrap_or(credentials);
-        let host = host.split(':').next().unwrap_or(host);
-        (!user.is_empty() && !host.is_empty()).then(|| format!("{user}@{host}"))
+        let parts = self.parts()?;
+        (!parts.user.is_empty() && !parts.host.is_empty())
+            .then(|| format!("{}@{}", parts.user, parts.host))
+    }
+}
+
+fn parse_url(url: &str) -> Option<UrlParts> {
+    let (scheme, rest) = url.split_once("://")?;
+    if scheme.is_empty() {
+        return None;
+    }
+    // The authority runs to the first `/` or `?`; the database is whatever follows the slash.
+    let end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    let (user, host_port) = match authority.rsplit_once('@') {
+        Some((credentials, host)) => (credentials.split(':').next().unwrap_or(credentials), host),
+        None => ("", authority),
+    };
+    let (host, port) = split_port(host_port);
+    let database = tail
+        .strip_prefix('/')
+        .unwrap_or_default()
+        .split('?')
+        .next()
+        .unwrap_or_default();
+
+    Some(UrlParts {
+        scheme: scheme.to_string(),
+        user: user.to_string(),
+        host: host.to_string(),
+        port,
+        database: database.to_string(),
+    })
+}
+
+/// Splits `host:port`. An IPv6 literal carries its own colons inside brackets, so only a colon
+/// after the `]` can be a port; anything that is not a number is part of the host.
+fn split_port(authority: &str) -> (&str, Option<u16>) {
+    let search_from = authority.rfind(']').map_or(0, |end| end + 1);
+    let Some(offset) = authority[search_from..].rfind(':') else {
+        return (authority, None);
+    };
+    let colon = search_from + offset;
+    match authority[colon + 1..].parse() {
+        Ok(port) => (&authority[..colon], Some(port)),
+        Err(_) => (authority, None),
     }
 }
 
@@ -489,7 +568,7 @@ fn hsl_to_rgb(hue: f32, saturation: f32, lightness: f32) -> (u8, u8, u8) {
     (byte(red), byte(green), byte(blue))
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SshTunnelConfig {
     pub ssh_host: String,
     pub ssh_user: String,
@@ -514,7 +593,7 @@ impl SshTunnelConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::DatabaseConnection;
+    use super::{DatabaseConnection, UrlParts};
 
     fn tinted(color: &str) -> Option<(u8, u8, u8)> {
         DatabaseConnection {
@@ -579,6 +658,95 @@ mod tests {
         assert_eq!(at("postgres://localhost:5432/app"), None);
         assert_eq!(at("not a url"), None);
         assert_eq!(at(""), None);
+    }
+
+    fn parts_of(url: &str) -> Option<UrlParts> {
+        DatabaseConnection {
+            url: url.to_string(),
+            ..DatabaseConnection::default()
+        }
+        .parts()
+    }
+
+    /// Every preset has to survive the round trip the swatches draw it through, or the colour
+    /// picker would offer a swatch it cannot render.
+    #[test]
+    fn every_colour_preset_parses() {
+        for (name, color) in super::CONNECTION_COLOR_PRESETS {
+            let connection = DatabaseConnection {
+                color: color.to_string(),
+                ..DatabaseConnection::default()
+            };
+            assert!(connection.rgb().is_some(), "{name} ({color})");
+        }
+    }
+
+    #[test]
+    fn a_url_splits_into_the_parts_the_form_shows() {
+        assert_eq!(
+            parts_of("postgres://dbuser:hunter2@db.example.com:5432/app"),
+            Some(UrlParts {
+                scheme: "postgres".to_string(),
+                user: "dbuser".to_string(),
+                host: "db.example.com".to_string(),
+                port: Some(5432),
+                database: "app".to_string(),
+            }),
+        );
+    }
+
+    /// The two shapes `~/peek/settings.json` actually holds: no port, and no database at all
+    /// because the query string follows the host directly.
+    #[test]
+    fn the_absent_parts_are_empty_rather_than_guessed() {
+        let no_port = parts_of("postgres://metered_user:pw@localhost/forge").expect("parses");
+        assert_eq!(no_port.port, None);
+        assert_eq!(no_port.database, "forge");
+
+        let no_database =
+            parts_of("postgresql://user:pw@db.prisma.io:5432?sslmode=verify-full").expect("parses");
+        assert_eq!(no_database.database, "");
+        assert_eq!(no_database.port, Some(5432));
+        assert_eq!(no_database.host, "db.prisma.io");
+    }
+
+    #[test]
+    fn a_database_keeps_none_of_the_query_string() {
+        let parts = parts_of("mysql://root:pw@10.0.0.2:3306/shop?ssl=true").expect("parses");
+        assert_eq!(parts.scheme, "mysql");
+        assert_eq!(parts.database, "shop");
+    }
+
+    /// An IPv6 literal's own colons are not a port, and a non-numeric tail is part of the host.
+    #[test]
+    fn only_a_numeric_tail_after_the_brackets_is_a_port() {
+        let literal = parts_of("postgres://u:p@[::1]:5432/app").expect("parses");
+        assert_eq!(literal.host, "[::1]");
+        assert_eq!(literal.port, Some(5432));
+
+        let bare = parts_of("postgres://u:p@[::1]/app").expect("parses");
+        assert_eq!(bare.host, "[::1]");
+        assert_eq!(bare.port, None);
+
+        let not_a_port = parts_of("postgres://u:p@host:notaport/app").expect("parses");
+        assert_eq!(not_a_port.host, "host:notaport");
+        assert_eq!(not_a_port.port, None);
+    }
+
+    #[test]
+    fn a_url_without_a_scheme_has_no_parts() {
+        assert_eq!(parts_of("not a url"), None);
+        assert_eq!(parts_of(""), None);
+        assert_eq!(parts_of("://host/db"), None);
+    }
+
+    /// The password must never reach a caller: `UrlParts` has no field for it, and the user is
+    /// cut at the first `:` on the way in.
+    #[test]
+    fn the_parts_never_carry_the_password() {
+        let parts = parts_of("postgres://dbuser:hunter2@host/app").expect("parses");
+        assert_eq!(parts.user, "dbuser");
+        assert!(!format!("{parts:?}").contains("hunter2"));
     }
 
     #[test]

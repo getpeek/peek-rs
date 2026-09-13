@@ -18,6 +18,7 @@
 pub(crate) mod close_page;
 pub(crate) mod connection;
 pub(crate) mod pages;
+pub(crate) mod picker;
 
 use gpui_kit::component::{ActiveTheme, StyledExt, TitleBar};
 use gpui_kit::prelude::*;
@@ -26,7 +27,8 @@ use gpui_kit::{
 };
 
 use crate::commands::actions;
-use connection::ConnectionPicker;
+use crate::settings::Settings;
+use connection::ConnectionPill;
 use pages::PageTabs;
 
 /// The reference's bar is 50 px carrying the collaborate controls we do not have yet; 40 px is a
@@ -51,19 +53,19 @@ pub(crate) fn window_options() -> WindowOptions {
 
 #[derive(IntoElement)]
 pub(crate) struct PeekTitleBar {
-    picker: ConnectionPicker,
+    pill: ConnectionPill,
     pages: Entity<PageTabs>,
     canvas_focus: FocusHandle,
 }
 
 impl PeekTitleBar {
     pub(crate) fn new(
-        picker: ConnectionPicker,
+        pill: ConnectionPill,
         pages: Entity<PageTabs>,
         canvas_focus: FocusHandle,
     ) -> Self {
         Self {
-            picker,
+            pill,
             pages,
             canvas_focus,
         }
@@ -78,6 +80,12 @@ impl RenderOnce for PeekTitleBar {
         } else {
             TRAFFIC_LIGHT_INSET
         };
+        let palette_button_shown = Settings::get(cx)
+            .ui
+            .titlebar
+            .command_palette_button
+            .is_shown();
+        let canvas_focus = self.canvas_focus.clone();
 
         TitleBar::new()
             .h(HEIGHT)
@@ -91,8 +99,13 @@ impl RenderOnce for PeekTitleBar {
                     .h_flex()
                     .gap_2()
                     .flex_shrink_0()
-                    .child(self.picker)
-                    .child(palette_button(&self.canvas_focus)),
+                    .child(self.pill)
+                    // `Settings::ToggleCommandPaletteButton`: the palette keeps working from
+                    // its shortcut, so this is a preference about chrome, not about the
+                    // command.
+                    .when(palette_button_shown, move |this| {
+                        this.child(palette_button(&canvas_focus))
+                    }),
             )
     }
 }

@@ -1,4 +1,4 @@
-//! The dot grid (`CanvasBackground.tsx`: 28 world units apart, one pixel dots), thinned by
+//! The dot grid (`CanvasBackground.tsx`: 28 world units apart), thinned by
 //! doubling the gap as the camera zooms out so it never turns into noise.
 
 use gpui_kit::{Bounds, Hsla, Pixels, Window, fill, point, px, size};
@@ -25,7 +25,7 @@ pub(crate) fn paint_dot_grid(
         clippy::cast_possible_truncation,
         reason = "dot sizes are a few pixels"
     )]
-    let dot = px((camera.zoom as f32).clamp(1.0, 2.0));
+    let dot = px((camera.zoom as f32 * 1.25).clamp(1.25, 2.0));
     let half = dot / 2.0;
 
     let mut y = first_y;

@@ -12,6 +12,7 @@ use gpui_kit::{
     Style, Window, fill, linear_color_stop, linear_gradient, px, quad, relative, size,
     transparent_black,
 };
+use peek_canvas::render_scale;
 use peek_canvas::stroke::{self as peek_stroke, StrokeOptions};
 use peek_canvas::{Camera, Rect};
 
@@ -19,6 +20,7 @@ use crate::node::draw::{Placement, tessellate};
 
 use super::convert::to_pixel_bounds;
 use super::edges::{self, EdgeItem};
+use super::frame_stats::Phase;
 use super::{CanvasView, grid, screen_rect};
 
 /// Selection ring: constant screen width and offset regardless of zoom (`node.css`).
@@ -87,10 +89,29 @@ impl CanvasElement {
         self
     }
 
+    /// Whether the view is collecting frame timings, asked before an `Instant::now`.
+    fn timing(&self, cx: &App) -> bool {
+        self.view.read(cx).frame_stats_enabled()
+    }
+
+    fn record(&self, phase: Phase, started: Option<std::time::Instant>, cx: &mut App) {
+        let Some(started) = started else {
+            return;
+        };
+        let elapsed = started.elapsed();
+        self.view
+            .update(cx, |view, _| view.record_frame_phase(phase, elapsed));
+    }
+
+    /// The rem size node contents are laid out at.
+    ///
+    /// Snapped, not the raw zoom: gpui keys its line-layout and glyph caches on the exact font
+    /// size, so a continuously changing rem re-shapes every visible string every frame. The
+    /// node's *box* still uses the exact zoom — see [`peek_canvas::render_scale`].
     fn node_rem(&self) -> Pixels {
-        #[allow(clippy::cast_possible_truncation, reason = "zoom is within 0.1..=4")]
-        let zoom = self.camera.zoom as f32;
-        self.base_rem * zoom
+        #[allow(clippy::cast_possible_truncation, reason = "scale is within 0.1..=4")]
+        let scale = render_scale(self.camera.zoom) as f32;
+        self.base_rem * scale
     }
 }
 
@@ -140,6 +161,7 @@ impl Element for CanvasElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        let started = self.timing(cx).then(std::time::Instant::now);
         self.view
             .update(cx, |view, cx| view.set_pane_bounds(bounds, cx));
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
@@ -161,6 +183,7 @@ impl Element for CanvasElement {
             }
         });
 
+        self.record(Phase::Prepaint, started, cx);
         CanvasPrepaint { hitbox }
     }
 
@@ -174,6 +197,7 @@ impl Element for CanvasElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let started = self.timing(cx).then(std::time::Instant::now);
         let camera = self.camera;
         let rem = self.node_rem();
         let radius = self.node_radius(camera);
@@ -236,6 +260,7 @@ impl Element for CanvasElement {
 
         window.set_cursor_style(self.cursor, &prepaint.hitbox);
         register_pointer_listeners(&self.view, &prepaint.hitbox, window);
+        self.record(Phase::Paint, started, cx);
     }
 }
 

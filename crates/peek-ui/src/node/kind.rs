@@ -4,8 +4,9 @@
 //! be built independently of each other: nothing but this dispatch and [`super::state`] is
 //! shared between them.
 
-use gpui_kit::{AnyElement, App, Entity, Window};
-use peek_canvas::Document;
+use gpui_kit::prelude::*;
+use gpui_kit::{AnyElement, App, Entity, Window, div};
+use peek_canvas::{Detail, Document};
 use peek_document::{Node, NodeKind};
 
 use super::state::NodeState;
@@ -26,12 +27,22 @@ pub(crate) struct NodeContext<'a> {
     pub(crate) state: Option<&'a NodeState>,
     /// The shell draws its own selected border; a bare kind reads this to colour itself.
     pub(crate) selected: bool,
-    /// The camera's zoom.
+    /// How much of the node is worth building at the camera's zoom. Already resolved per node,
+    /// so a selected node arrives here as [`Detail::Full`] whatever the camera is doing.
+    pub(crate) detail: Detail,
+    /// The node's own world size, so a body that has to lay itself out against it does not
+    /// scan the document back for the node it was just built from.
+    pub(crate) size: peek_document::geometry::Size,
+    /// Pixels per world unit for a node's **contents**.
     ///
     /// Most kinds never need it: they are rem-based and the shell lays them out inside
-    /// `with_rem_size(base * zoom)`, so they scale for free. A kind that has to size something
+    /// `with_rem_size(base * scale)`, so they scale for free. A kind that has to size something
     /// in **pixels** does — and it cannot read the scaled rem size, because bodies are built in
     /// `CanvasView::render`, before the rem scope the element is later laid out in.
+    ///
+    /// This is the camera's zoom snapped to the content ladder, not the zoom itself, so that a
+    /// pixel size computed here agrees with the rem scope the element lands in. See
+    /// [`peek_canvas::render_scale`] for why the two are separated.
     pub(crate) zoom: f64,
 }
 
@@ -41,6 +52,8 @@ impl std::fmt::Debug for NodeContext<'_> {
             .debug_struct("NodeContext")
             .field("has_state", &self.state.is_some())
             .field("selected", &self.selected)
+            .field("detail", &self.detail)
+            .field("size", &self.size)
             .field("zoom", &self.zoom)
             .finish_non_exhaustive()
     }
@@ -72,6 +85,13 @@ pub(crate) fn body(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
+    // Too small to read, so not worth building: the shell around this still draws the card, the
+    // kind indicator and the title, which is all there is to see at this distance anyway. Bare
+    // kinds are exempt because they have no shell — their body *is* their card, and a text note
+    // or a drawing would simply disappear — and both are already a single element deep.
+    if context.detail.is_reduced() && !is_bare(node) {
+        return div().size_full().into_any_element();
+    }
     match &node.kind {
         NodeKind::Agent(data) => agent::body(&node.id, data, context, window, cx),
         NodeKind::Query(data) => query::body(&node.id, data, context, window, cx),
@@ -94,6 +114,9 @@ pub(crate) fn header_extras(
     window: &mut Window,
     cx: &mut App,
 ) -> Option<AnyElement> {
+    if context.detail.is_reduced() {
+        return None;
+    }
     match &node.kind {
         NodeKind::Agent(data) => agent::header_extras(&node.id, data, context, window, cx),
         NodeKind::Query(data) => Some(query::header_extras(&node.id, data, context, window, cx)),

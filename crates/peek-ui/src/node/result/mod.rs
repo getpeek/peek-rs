@@ -27,10 +27,13 @@ mod edit;
 mod editable;
 mod follow;
 mod json;
+pub(crate) mod pivot;
 mod search;
 mod selection;
 mod toolbar;
 mod widths;
+
+use std::sync::Arc;
 
 use gpui_kit::TestSupportExt;
 use gpui_kit::component::input::{InputEvent, InputState};
@@ -60,8 +63,13 @@ const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(10
 const HEADING_LIMIT: usize = 60;
 
 pub(crate) fn title(data: &ResultData) -> String {
-    let line = data
-        .query
+    heading(&data.query)
+}
+
+/// The same cut applied to raw SQL, for callers holding a query rather than a node's data —
+/// page search names a result by the statement behind it.
+pub(crate) fn heading(query: &str) -> String {
+    let line = query
         .lines()
         .map(|line| line.trim_start_matches("--").trim())
         .find(|line| !line.is_empty())
@@ -98,6 +106,10 @@ pub(crate) struct ResultTable {
     /// Tables the query reads, for the toolbar's badges. Recomputed only when the SQL changes:
     /// parsing a statement every frame would be wasteful and the answer never moves on its own.
     pub(super) tables: Vec<SharedString>,
+    /// The single table this result can be written through, from the same parse as `tables`.
+    /// The toolbar asks on every frame — a delete button only exists for a writable result —
+    /// and answering it with a fresh tree-sitter parse per frame was exactly that waste.
+    pub(super) editable: Option<String>,
     query: String,
     /// Set when the columns or the SQL changed, so the next reconcile reclassifies them.
     roles_stale: bool,
@@ -109,7 +121,34 @@ pub(crate) struct ResultTable {
     pub(super) search_query: String,
     /// Dropping it cancels the pending search, so reassigning *is* restart-the-debounce.
     search_task: Task<()>,
+    /// Element ids derived from the node id. Built once: they never change, and `format!`ing
+    /// five of them per frame per visible result is allocation for a constant.
+    pub(super) ids: ElementIds,
     _subscriptions: [gpui_kit::Subscription; 3],
+}
+
+/// The node-scoped element ids a result node needs, minted once in [`ResultTable::new`].
+#[derive(Debug, Clone)]
+pub(super) struct ElementIds {
+    pub(super) table: SharedString,
+    pub(super) delete: SharedString,
+    pub(super) pivot: SharedString,
+    pub(super) search: SharedString,
+    pub(super) search_close: SharedString,
+    pub(super) detail_close: SharedString,
+}
+
+impl ElementIds {
+    fn new(node: &NodeId) -> Self {
+        Self {
+            table: SharedString::from(format!("{node}-table")),
+            delete: SharedString::from(format!("{node}-delete")),
+            pivot: SharedString::from(format!("{node}-pivot")),
+            search: SharedString::from(format!("{node}-search")),
+            search_close: SharedString::from(format!("{node}-search-close")),
+            detail_close: SharedString::from(format!("{node}-detail-close")),
+        }
+    }
 }
 
 impl ResultTable {
@@ -120,25 +159,38 @@ impl ResultTable {
     fn reconcile(&mut self, incoming: &Incoming, cx: &mut Context<Self>) {
         self.zoom = incoming.zoom;
         if self.query != incoming.query {
-            self.query.clone_from(&incoming.query);
-            self.tables = query_tables(&self.query);
+            self.query = incoming.query.to_string();
+            let facts = QueryFacts::of(&self.query);
+            self.tables = facts.tables;
+            self.editable = facts.editable;
             self.roles_stale = true;
         }
-        let changed = self.table.update(cx, |table, cx| {
-            let changed = table.delegate_mut().adopt(
-                &incoming.rows,
-                incoming.widths.as_ref(),
-                (incoming.available, incoming.zoom),
-            );
-            if changed {
-                // `column()` is only read on prepare and refresh, so a width the delegate just
-                // recomputed is invisible until the table is told to re-read it.
+        let adopted = self.table.update(cx, |table, cx| {
+            // The transposition changes what every row and column index means, so the table has
+            // to re-read its columns before anything else this frame is measured against them.
+            if table.delegate_mut().set_pivoted(incoming.pivoted) {
                 table.refresh(cx);
             }
-            changed
+            let adopted = table.delegate_mut().adopt(
+                &incoming.rows,
+                incoming.widths,
+                (incoming.available, incoming.zoom),
+            );
+            if adopted.needs_refresh() {
+                // `column()` is only read on prepare and refresh, so a width the delegate just
+                // recomputed — or a zoom that changed what it converts to in pixels — is
+                // invisible until the table is told to re-read it.
+                table.refresh(cx);
+            }
+            adopted
         });
-        if changed || self.roles_stale {
+        // Roles are classified against the *columns*, which only a new result can change. A
+        // zoom moves the pixel widths and nothing else, so it must not drag a schema walk and
+        // a notify along behind it.
+        if adopted.rows_changed || self.roles_stale {
             self.refresh_roles(cx);
+            cx.notify();
+        } else if adopted.needs_refresh() {
             cx.notify();
         }
     }
@@ -164,6 +216,19 @@ impl ResultTable {
             let roles = column_roles::classify(&columns, &tables, Some(&schema));
             table.delegate_mut().set_roles(roles);
         });
+    }
+
+    /// The toolbar's Pivot button. It selects its own node first, because the handler pivots the
+    /// *selection* — a click on an unselected result would otherwise pivot whichever node was.
+    /// Dispatching rather than calling the toggle keeps the button, the palette and the keyboard
+    /// on one path.
+    fn dispatch_pivot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let node = self.node.clone();
+        self.document.update(cx, |document, cx| {
+            document.select_only([node]);
+            cx.notify();
+        });
+        window.dispatch_action(Box::new(crate::commands::actions::result::Pivot), cx);
     }
 
     fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -360,6 +425,8 @@ impl ResultState {
         let document = document.clone();
         let search_input = toolbar::search_input(window, cx);
         let query = data.query.clone();
+        let facts = QueryFacts::of(&query);
+        let ids = ElementIds::new(id);
         let inner = cx.new(|cx| ResultTable {
             _subscriptions: [
                 cx.subscribe(
@@ -391,7 +458,9 @@ impl ResultState {
                     },
                 ),
             ],
-            tables: query_tables(&query),
+            tables: facts.tables,
+            editable: facts.editable,
+            ids,
             query,
             roles_stale: true,
             zoom: 1.0,
@@ -424,12 +493,17 @@ impl ResultState {
 }
 
 /// What `body` hands the entity each frame.
-struct Incoming {
-    rows: ResultSet,
-    widths: Option<BTreeMap<String, f64>>,
-    query: String,
+///
+/// Borrowed rather than owned: this is built once per visible result per frame, and the two
+/// owned fields it used to carry were a `BTreeMap` and a `String` cloned for a comparison that
+/// almost always says "unchanged".
+struct Incoming<'a> {
+    rows: Arc<ResultSet>,
+    widths: Option<&'a BTreeMap<String, f64>>,
+    query: &'a str,
     available: f64,
     zoom: f64,
+    pivoted: bool,
 }
 
 pub(crate) fn body(
@@ -442,19 +516,17 @@ pub(crate) fn body(
     let Some(NodeState::Result(state)) = context.state else {
         return div().into_any_element();
     };
-    let document = context.document.read(cx);
-    let rows = document.result(id).cloned();
-    let available = document.node(id).map_or(0.0, |node| node.size().width);
-    let Some(rows) = rows else {
+    let Some(rows) = context.document.read(cx).result(id).cloned() else {
         return empty_state("Run the query to load rows", cx);
     };
 
     let incoming = Incoming {
         rows,
-        widths: data.column_widths.clone(),
-        query: data.query.clone(),
-        available,
+        widths: data.column_widths.as_ref(),
+        query: &data.query,
+        available: context.size.width,
         zoom: context.zoom,
+        pivoted: data.pivoted.unwrap_or_default(),
     };
     let inner = state.inner.clone();
     inner.update(cx, |table, cx| table.reconcile(&incoming, cx));
@@ -480,7 +552,7 @@ impl Render for ResultTable {
         let row_height = px((ROW_HEIGHT * self.zoom) as f32);
 
         div()
-            .id(SharedString::from(format!("{}-table", self.node)))
+            .id(self.ids.table.clone())
             .aria_label(SharedString::from(selected))
             .test_support()
             // Sits above the table on the focus path, so these fire while the table holds focus
@@ -498,6 +570,13 @@ impl Render for ResultTable {
             ))
             .on_action(cx.listener(
                 |this, _: &crate::commands::actions::page::Search, window, cx| {
+                    // The find bar filters rows, which the record view does not lay out as rows.
+                    // Letting the action carry on hands the same key to the page-wide search,
+                    // which is what the reference's `selected && !pivoted` gate amounts to.
+                    if this.table.read(cx).delegate().is_pivoted() {
+                        cx.propagate();
+                        return;
+                    }
                     this.open_search(window, cx);
                 },
             ))
@@ -533,12 +612,29 @@ impl Render for ResultTable {
 }
 
 /// The tables a query reads, for the toolbar's badges.
-fn query_tables(query: &str) -> Vec<SharedString> {
-    peek_lsp::analyze_query(query)
-        .tables
-        .into_iter()
-        .map(|table| SharedString::from(table.name))
-        .collect()
+/// Everything the toolbar and the edit path need to know about the SQL behind a result, from
+/// one tree-sitter parse.
+///
+/// They used to parse separately — the badges here, the writable-table check in `edit.rs` — and
+/// the second one sat on the render path, so a connected result re-parsed its statement on every
+/// frame. One parse, cached against the SQL, answers both.
+struct QueryFacts {
+    tables: Vec<SharedString>,
+    editable: Option<String>,
+}
+
+impl QueryFacts {
+    fn of(query: &str) -> Self {
+        let info = peek_lsp::analyze_query(query);
+        Self {
+            editable: editable::editable_table(&info),
+            tables: info
+                .tables
+                .into_iter()
+                .map(|table| SharedString::from(table.name))
+                .collect(),
+        }
+    }
 }
 
 /// Stops a wheel the table actually consumed from also panning the canvas.
@@ -676,7 +772,7 @@ mod render_tests {
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{
         AppContext, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-        SharedString, TestAppContext, VisualTestContext, point, px, size,
+        PinchEvent, SharedString, TestAppContext, TouchPhase, VisualTestContext, point, px, size,
     };
     use peek_document::{CanvasDocument, Cell, Column, NodeData, NodeId, ResultSet};
 
@@ -731,6 +827,20 @@ mod render_tests {
         gpui_kit::WindowHandle<Root>,
         gpui_kit::Entity<WorkspaceView>,
     ) {
+        open_zoomed(cx, count, 1.0)
+    }
+
+    /// The same, with the document's saved viewport at `zoom`, which is how a page reopens at
+    /// whatever the camera was left at — including far enough out to reduce its nodes.
+    fn open_zoomed(
+        cx: &mut TestAppContext,
+        count: usize,
+        zoom: f64,
+    ) -> (
+        gpui_kit::WindowHandle<Root>,
+        gpui_kit::Entity<WorkspaceView>,
+    ) {
+        let document_json = DOCUMENT.replace(r#""zoom": 1"#, &format!(r#""zoom": {zoom}"#));
         cx.update(|cx| {
             let mut config = peek_config::PeekConfig::default();
             config.theme = peek_config::ThemeId::Midday;
@@ -738,7 +848,7 @@ mod render_tests {
         });
         let mut workspace = None;
         let handle = cx.open_window(size(px(1200.0), px(800.0)), |window, cx| {
-            let document = CanvasDocument::from_json(DOCUMENT).unwrap();
+            let document = CanvasDocument::from_json(&document_json).unwrap();
             let view = cx.new(|cx| {
                 let view = WorkspaceView::with_document("test", document, window, cx);
                 view.document(cx).update(cx, |document, _| {
@@ -1237,6 +1347,100 @@ mod render_tests {
     }
 
     /// `cmd-f` opens the find bar while the table has focus.
+    /// Pivoting transposes the grid: a table row is now one of the result's *columns*, and a
+    /// table column is one record. `DataTable` registers no ids for its cells, so the delegate's
+    /// own view of its contents is the observable.
+    #[gpui_kit::test]
+    fn pivoting_turns_the_columns_into_rows(cx: &mut TestAppContext) {
+        let (handle, workspace) = open(cx, 2);
+        assert_eq!(dump(cx, &workspace, 0..2).0, ["id", "name"]);
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            workspace.read(cx).document(cx).update(cx, |document, cx| {
+                super::pivot::toggle(document, &result_node());
+                cx.notify();
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        let (headers, body) = dump(cx, &workspace, 0..2);
+        assert_eq!(headers, ["Field", "#1", "#2"]);
+        assert_eq!(body[0], ["id", "0", "1"]);
+        assert_eq!(body[1], ["name", "row 0", "row 1"]);
+    }
+
+    /// `Page::Search` is bound page-wide and the result node handles it too, so one keypress
+    /// reaches two handlers. Only the deeper one may run: gpui clears `propagate_event` before
+    /// **every** bubble-phase action listener (`window.rs`, "Actions stop propagation by default
+    /// during the bubble phase"), so the node wins without asking. This is the assertion that
+    /// pins it — its twin below is the same key with the node deliberately propagating.
+    #[gpui_kit::test]
+    fn cmd_f_in_a_focused_result_does_not_also_open_the_page_search(cx: &mut TestAppContext) {
+        let (handle, workspace) = open(cx, 20);
+        let bounds = table_bounds(cx, handle);
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        click_at(&mut visual, cell_at(bounds, 0.0, 0.0));
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("cmd-f", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        let opened = cx.update(|cx| {
+            workspace
+                .read(cx)
+                .result_inner(&result_node(), cx)
+                .is_some_and(|table| table.read(cx).is_search_open())
+        });
+        assert!(opened, "the in-result find bar opened");
+
+        let page_search = cx
+            .update_window(handle.into(), |_, window, _| {
+                window.try_find("page-search").is_some()
+            })
+            .unwrap();
+        assert!(!page_search, "and the page-wide search did not");
+    }
+
+    /// The find bar filters rows, which the record view has none of — so the same key belongs to
+    /// the page-wide search while a result is pivoted. The twin of the test above: the one
+    /// handler that *does* call `cx.propagate()` is the one that hands the key on.
+    #[gpui_kit::test]
+    fn cmd_f_does_not_open_the_find_bar_in_the_record_view(cx: &mut TestAppContext) {
+        let (handle, workspace) = open(cx, 20);
+        let bounds = table_bounds(cx, handle);
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        click_at(&mut visual, cell_at(bounds, 0.0, 0.0));
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            workspace.read(cx).document(cx).update(cx, |document, cx| {
+                super::pivot::toggle(document, &result_node());
+                cx.notify();
+            });
+            window.render_frame(cx);
+            window.press("cmd-f", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        let opened = cx.update(|cx| {
+            workspace
+                .read(cx)
+                .result_inner(&result_node(), cx)
+                .is_some_and(|table| table.read(cx).is_search_open())
+        });
+        assert!(!opened, "the find bar stayed shut");
+
+        let page_search = cx
+            .update_window(handle.into(), |_, window, _| {
+                window.try_find("page-search").is_some()
+            })
+            .unwrap();
+        assert!(page_search, "the page-wide search took the key instead");
+    }
+
     #[gpui_kit::test]
     fn cmd_f_opens_the_find_bar(cx: &mut TestAppContext) {
         let (handle, workspace) = open(cx, 20);
@@ -1565,6 +1769,195 @@ mod render_tests {
         });
         cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
             .unwrap();
+    }
+
+    // ---- level of detail ----------------------------------------------------------------
+
+    /// Past the point where a card is readable, the body stops being built: at this distance a
+    /// 600x440 node is under 200 px wide, and the toolbar plus a few hundred cells inside it are
+    /// laid out for nobody. The shell stays, so the node is still findable and still says what
+    /// kind it is.
+    #[gpui_kit::test]
+    fn a_result_too_small_to_read_builds_no_table(cx: &mut TestAppContext) {
+        let (handle, _workspace) = open_zoomed(cx, 200, 0.2);
+        let (card, table) = cx
+            .update_window(handle.into(), |_, window, _| {
+                (
+                    window
+                        .try_find(SharedString::from(result_node().to_string()))
+                        .is_some(),
+                    window
+                        .try_find(SharedString::from(format!("{}-table", result_node())))
+                        .is_some(),
+                )
+            })
+            .unwrap();
+        assert!(card, "the shell must still draw, or the node vanishes");
+        assert!(!table, "the table must not be built at this zoom");
+    }
+
+    /// The node the user is working with is exempt: it is what `Zoom::FitSelection` is about to
+    /// fly to, and a selected card going blank under the selection ring reads as a bug.
+    #[gpui_kit::test]
+    fn a_selected_result_keeps_its_table_however_far_out_the_camera_is(cx: &mut TestAppContext) {
+        let (handle, workspace) = open_zoomed(cx, 200, 0.2);
+        cx.update(|cx| {
+            workspace.read(cx).document(cx).update(cx, |document, cx| {
+                document.select_only([result_node()]);
+                cx.notify();
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        let table = cx
+            .update_window(handle.into(), |_, window, _| {
+                window
+                    .try_find(SharedString::from(format!("{}-table", result_node())))
+                    .is_some()
+            })
+            .unwrap();
+        assert!(table, "a selected result keeps its body");
+    }
+
+    /// Rows survive the round trip out and back: reducing a node must drop its *element tree*,
+    /// never the state behind it.
+    #[gpui_kit::test]
+    fn a_reduced_result_still_has_its_rows_when_the_camera_comes_back(cx: &mut TestAppContext) {
+        let (handle, workspace) = open(cx, 5);
+        assert_eq!(dump(cx, &workspace, 0..5).1.len(), 5);
+
+        // Driven through real pinches: `Page::viewport` only seeds the camera when the view is
+        // built, so writing it back would leave the live camera exactly where it was.
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        let anchor = point(px(600.0), px(400.0));
+        let pinch = |delta: f32, visual: &mut VisualTestContext| {
+            for _ in 0..40 {
+                visual.simulate_event(PinchEvent {
+                    position: anchor,
+                    delta,
+                    modifiers: Modifiers::default(),
+                    phase: TouchPhase::Moved,
+                });
+            }
+        };
+        pinch(-0.05, &mut visual);
+        assert!(
+            cx.update(|cx| workspace.read(cx).camera(cx).zoom) < peek_canvas::lod::REDUCE_BELOW,
+            "the pinch has to actually cross the threshold for this to prove anything"
+        );
+        let reduced = cx
+            .update_window(handle.into(), |_, window, _| {
+                window
+                    .try_find(SharedString::from(format!("{}-table", result_node())))
+                    .is_some()
+            })
+            .unwrap();
+        assert!(
+            !reduced,
+            "the body is gone while the camera is this far out"
+        );
+
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        pinch(0.06, &mut visual);
+        assert_eq!(
+            dump(cx, &workspace, 0..5).1.len(),
+            5,
+            "the rows must outlive a trip past the detail threshold"
+        );
+    }
+
+    /// The reason zooming used to cost so much: a scale change moved the pixel widths, and the
+    /// delegate treated that as new layout — re-measuring 30 rows of every column and restaling
+    /// the schema roles — for widths that are world units and cannot have moved.
+    #[gpui_kit::test]
+    fn zooming_alone_never_re_resolves_the_column_widths(cx: &mut TestAppContext) {
+        let (_handle, workspace) = open(cx, 50);
+        let fresh = std::sync::Arc::new(rows(80));
+        cx.update(|cx| {
+            let table = workspace
+                .read(cx)
+                .result_table(&result_node(), cx)
+                .expect("the result node has a table");
+            table.update(cx, |table, _| {
+                let delegate = table.delegate_mut();
+                let first = delegate.adopt(&fresh, None, (600.0, 1.0));
+                assert!(
+                    first.rows_changed,
+                    "80 rows where there were 50 is new rows"
+                );
+
+                // The same rows, the same box, a different camera.
+                let zoomed = delegate.adopt(&fresh, None, (600.0, 0.5));
+                assert!(!zoomed.rows_changed, "a zoom does not change the rows");
+                assert!(
+                    !zoomed.widths_changed,
+                    "a zoom does not change world widths"
+                );
+                assert!(zoomed.scale_changed, "but it does change the pixel scale");
+
+                // And a frame that changes nothing at all reports nothing at all.
+                let idle = delegate.adopt(&fresh, None, (600.0, 0.5));
+                assert!(!idle.rows_changed && !idle.widths_changed && !idle.scale_changed);
+            });
+        });
+    }
+
+    /// A live query re-runs every ten seconds and usually gets identical rows back. That arrives
+    /// as a *different* `Arc`, so the cheap pointer check alone would call it new rows and throw
+    /// away the user's selection twice a minute.
+    #[gpui_kit::test]
+    fn a_live_re_run_with_identical_rows_is_not_new_rows(cx: &mut TestAppContext) {
+        let (_handle, workspace) = open(cx, 50);
+        let first = std::sync::Arc::new(rows(50));
+        let identical = std::sync::Arc::new(rows(50));
+        assert!(
+            !std::sync::Arc::ptr_eq(&first, &identical),
+            "the two runs must really be separate allocations"
+        );
+        cx.update(|cx| {
+            let table = workspace
+                .read(cx)
+                .result_table(&result_node(), cx)
+                .expect("the result node has a table");
+            table.update(cx, |table, _| {
+                let delegate = table.delegate_mut();
+                delegate.adopt(&first, None, (600.0, 1.0));
+                let polled = delegate.adopt(&identical, None, (600.0, 1.0));
+                assert!(
+                    !polled.rows_changed,
+                    "identical rows must not read as a new result"
+                );
+                assert!(!polled.widths_changed, "nor re-resolve the widths");
+
+                // And the pointer must have been adopted anyway, or every later frame would
+                // walk every cell again to reach the same answer.
+                let next_frame = delegate.adopt(&identical, None, (600.0, 1.0));
+                assert!(!next_frame.rows_changed && !next_frame.widths_changed);
+            });
+        });
+    }
+
+    /// A widened node is a real layout change, so the widths do have to be re-resolved.
+    #[gpui_kit::test]
+    fn resizing_the_node_does_re_resolve_them(cx: &mut TestAppContext) {
+        let (_handle, workspace) = open(cx, 50);
+        let shared = std::sync::Arc::new(rows(50));
+        cx.update(|cx| {
+            let table = workspace
+                .read(cx)
+                .result_table(&result_node(), cx)
+                .expect("the result node has a table");
+            table.update(cx, |table, _| {
+                let delegate = table.delegate_mut();
+                delegate.adopt(&shared, None, (600.0, 1.0));
+                let widened = delegate.adopt(&shared, None, (900.0, 1.0));
+                assert!(
+                    widened.widths_changed,
+                    "a wider body re-resolves the widths"
+                );
+                assert!(!widened.rows_changed);
+            });
+        });
     }
 }
 

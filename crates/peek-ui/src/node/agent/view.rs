@@ -510,12 +510,13 @@ impl AgentView {
                 gpui_kit::component::message_scroller::MessageScroller::new(
                     SharedString::from(format!("{node}-transcript")),
                     self.scroller.clone(),
-                    move |index, _window, cx| {
+                    move |index, window, cx| {
                         super::render_row(
                             &rows,
                             &messages,
                             (index, &expanded, loading),
                             view.clone(),
+                            window,
                             cx,
                         )
                     },
@@ -624,7 +625,7 @@ fn banner(warning: &SharedString, cx: &App) -> gpui_kit::AnyElement {
         .border_color(theme.node_border)
         .child(
             gpui_kit::component::Icon::new(gpui_kit::assets::IconName::TriangleAlert)
-                .size(gpui_kit::px(14.0))
+                .size(gpui_kit::rems(0.875))
                 .text_color(theme.yellow),
         )
         .child(

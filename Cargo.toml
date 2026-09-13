@@ -1,6 +1,6 @@
 [package]
 name = "peek"
-version = "5.0.0"
+version.workspace = true
 description = "A Database GUI"
 authors = ["Damoon Rashidi"]
 edition.workspace = true
@@ -20,7 +20,10 @@ workspace = true
 [workspace]
 members = ["crates/*"]
 
+# The application version. `peek-ui` inherits it because the About dialog shows it, and
+# `env!("CARGO_PKG_VERSION")` there would otherwise report peek-ui's own placeholder.
 [workspace.package]
+version = "5.0.0"
 edition = "2024"
 rust-version = "1.90"
 

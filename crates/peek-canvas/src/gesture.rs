@@ -670,6 +670,29 @@ fn clamp_zoom_step(factor: f64) -> f64 {
     factor.clamp(1.0 / MAX_ZOOM_STEP, MAX_ZOOM_STEP)
 }
 
+/// Whether a child scroller sitting at `offset`, with `max` of overflow, can still move on
+/// `delta`.
+///
+/// Scroll offsets run from `0` down to `-max`, and a positive delta scrolls back toward `0`, so
+/// each direction has its own edge to check. The offset is clamped first, because a scroller
+/// writes it unclamped when a wheel arrives and only pulls it back into range when the frame is
+/// laid out again — reading that transient overscroll raw would report room that is not there.
+///
+/// The canvas asks this of the node under the pointer before claiming a wheel for a pan, so a
+/// node body scrolls to its edge and the gesture then falls through to the camera
+/// (`useScrollFallthrough`'s `canAbsorb`).
+#[must_use]
+pub fn has_room(delta: f64, offset: f64, max: f64) -> bool {
+    let current = offset.clamp(-max, 0.0);
+    if delta > 0.0 {
+        return current < 0.0;
+    }
+    if delta < 0.0 {
+        return current > -max;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1621,6 +1644,52 @@ mod tests {
             "the middle drag is ignored and the wheel falls through: {effects:?}"
         );
         assert!(matches!(state, Interaction::Drawing { .. }), "still armed");
+    }
+
+    const SCROLL_MAX: f64 = 1000.0;
+
+    #[test]
+    fn a_scroller_short_enough_to_fit_has_no_room_either_way() {
+        assert!(!has_room(-120.0, 0.0, 0.0));
+        assert!(!has_room(120.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn a_half_scrolled_scroller_has_room_either_way() {
+        assert!(has_room(-120.0, -500.0, SCROLL_MAX));
+        assert!(has_room(120.0, -500.0, SCROLL_MAX));
+    }
+
+    /// At the start, scrolling back has nowhere to go and the canvas should pan instead — this
+    /// is what keeps a node body from trapping the gesture.
+    #[test]
+    fn at_the_start_only_the_forward_direction_has_room() {
+        assert!(!has_room(120.0, 0.0, SCROLL_MAX));
+        assert!(has_room(-120.0, 0.0, SCROLL_MAX));
+    }
+
+    #[test]
+    fn at_the_end_only_the_backward_direction_has_room() {
+        assert!(!has_room(-120.0, -SCROLL_MAX, SCROLL_MAX));
+        assert!(has_room(120.0, -SCROLL_MAX, SCROLL_MAX));
+    }
+
+    /// A fraction of a pixel of travel is still travel. The rule carries no epsilon on purpose:
+    /// it has to agree with the scrollers it arbitrates for, and they have none either, so a
+    /// tolerance here would hand the canvas a wheel the body was about to use.
+    #[test]
+    fn a_fraction_of_a_pixel_of_room_is_still_room() {
+        assert!(has_room(120.0, -0.2, SCROLL_MAX));
+        assert!(has_room(-120.0, -999.8, SCROLL_MAX));
+    }
+
+    /// The reason both sides are clamped: a wheel writes the offset unclamped and only the next
+    /// layout pulls it back, so between the two the offset reads past the edge. Without the
+    /// clamp that overscroll would look like room and the body would absorb for ever.
+    #[test]
+    fn a_transient_overscroll_past_the_end_still_reads_as_the_end() {
+        assert!(!has_room(-120.0, -SCROLL_MAX - 400.0, SCROLL_MAX));
+        assert!(!has_room(120.0, 400.0, SCROLL_MAX));
     }
 
     #[test]

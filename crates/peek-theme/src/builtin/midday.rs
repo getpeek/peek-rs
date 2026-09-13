@@ -20,8 +20,8 @@ pub(super) static MIDDAY: ThemeSpec = ThemeSpec {
 
     bg: Color::rgb(0xf7f6fc), // oklch(97.6% 0.008 293.9)
     // The CSS says `oklch(78% 0.8 293.7)`, a far out-of-gamut typo for `0.08` that browsers
-    // clip to magenta; the intended soft lavender is used here.
-    bg_grid: Color::rgb(0xb9aee6),
+    // clip to magenta; the accent, dialled back, is the lavender it meant.
+    bg_grid: Color::rgba(0x6b3fc43d), // accent / 0.24
     canvas: CanvasBackground {
         base: Color::rgb(0xf5f4fa), // oklch(97% 0.008 293.9)
         gradient: Some((Color::rgb(0xfaf9fd), Color::rgb(0xecebf3))),

@@ -20,7 +20,7 @@ pub(super) static BLUEPRINT: ThemeSpec = ThemeSpec {
     is_light: false,
 
     bg: Color::rgb(0x232136),
-    bg_grid: Color::rgb(0x44415a),
+    bg_grid: Color::rgba(0x9ccfd81f), // the CSS major grid line, opened up for dots
     canvas: CanvasBackground {
         base: Color::rgb(0x232136),
         // The CSS top vignette, flattened to a vertical gradient.

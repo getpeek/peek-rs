@@ -37,6 +37,81 @@ fn settle(cx: &mut TestAppContext, handle: WindowHandle<Root>) {
         .unwrap();
 }
 
+/// `focusCreated` in `executeQueries.ts`: a finished run selects the nodes it placed and flies
+/// the camera to them, so a result that landed off-screen is what the user is looking at.
+#[gpui_kit::test]
+fn a_finished_run_frames_the_node_it_placed(cx: &mut TestAppContext) {
+    use peek_document::NodeType;
+    use peek_document::geometry::{Point as World, Rect, Size as WorldSize};
+
+    let (handle, workspace) = open(cx);
+    cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    let initial = cx.update(|cx| workspace.read(cx).camera(cx));
+
+    // Far enough from the fixture that no starting camera could already be framing it.
+    let placed = cx.update(|cx| {
+        let document = workspace.read(cx).document(cx);
+        document.update(cx, |document, cx| {
+            let id = document.create_node(
+                NodeType::Result,
+                Rect::new(World::new(9000.0, 9000.0), WorldSize::new(600.0, 440.0)),
+            );
+            document.focus_created(vec![id.clone()]);
+            cx.notify();
+            id
+        })
+    });
+
+    let target = cx.update(|cx| workspace.read(cx).camera_target(cx));
+    assert!(!target.approx_eq(initial), "the run moves the camera");
+    assert!(
+        target.zoom <= 1.0,
+        "framing never zooms past 100%: {}",
+        target.zoom
+    );
+
+    cx.update(|cx| {
+        let view = workspace.read(cx);
+        let document = view.document(cx);
+        let document = document.read(cx);
+        assert_eq!(
+            document.selected().iter().collect::<Vec<_>>(),
+            vec![&placed],
+            "and selects what it placed"
+        );
+        let bounds = document.bounds_of([&placed]).unwrap();
+        let visible = target.visible_world_rect(peek_canvas::Size::new(1200.0, 800.0));
+        assert!(
+            visible.contains(bounds.min()) && visible.contains(bounds.max()),
+            "the placed node is in frame: {bounds:?} in {visible:?}"
+        );
+    });
+
+    settle(cx, handle);
+}
+
+/// A second run that only refreshed the result already on screen created nothing, so it leaves
+/// the camera where the user left it.
+#[gpui_kit::test]
+fn a_run_that_creates_nothing_leaves_the_camera_alone(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    let initial = cx.update(|cx| workspace.read(cx).camera(cx));
+
+    cx.update(|cx| {
+        let document = workspace.read(cx).document(cx);
+        document.update(cx, |document, cx| {
+            document.focus_created(Vec::new());
+            cx.notify();
+        });
+    });
+
+    let target = cx.update(|cx| workspace.read(cx).camera_target(cx));
+    assert!(target.approx_eq(initial));
+}
+
 #[gpui_kit::test]
 fn fit_view_frames_all_nodes_and_commits_the_viewport(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);

@@ -18,6 +18,9 @@ pub enum StorageError {
     /// Someone else — almost always the Tauri app, which autosaves the same files — wrote the
     /// document since this handle last read or wrote it. Refusing beats last-writer-wins.
     ChangedOnDisk,
+    /// A rename would land on a name that already has a document. Refusing beats merging two
+    /// canvases into one.
+    Occupied,
     Io(std::io::Error),
     Document(DocumentError),
 }
@@ -33,6 +36,7 @@ impl fmt::Display for StorageError {
                     "the document changed on disk since it was loaded"
                 )
             }
+            Self::Occupied => write!(formatter, "a document already exists under that name"),
             Self::Io(error) => write!(formatter, "document io error: {error}"),
             Self::Document(error) => write!(formatter, "{error}"),
         }
@@ -98,6 +102,73 @@ impl DocumentStore {
         let dir = self.workspace_dir(workspace)?;
         let path = dir.join(format!("{}.results.json", connection.to_lowercase()));
         Ok(ResultsFile::new(path, self.mode))
+    }
+
+    /// Moves a connection's document and its rows sidecar to a new name, so renaming a
+    /// connection takes its canvas with it. The reference leaves both behind under the old name
+    /// and opens the renamed connection on an empty board.
+    ///
+    /// A connection whose canvas was never opened has no files, and that is not an error — the
+    /// rename is simply a no-op.
+    ///
+    /// # Errors
+    /// [`StorageError::ReadOnly`] when this run may not write, [`StorageError::Occupied`] when
+    /// something already lives under `to`, and io errors from the move itself.
+    pub fn rename(&self, workspace: &str, from: &str, to: &str) -> Result<(), StorageError> {
+        if !self.mode.can_write() {
+            return Err(StorageError::ReadOnly);
+        }
+        // Paths are lowercased, so a change of case alone moves a file onto itself.
+        if from.eq_ignore_ascii_case(to) {
+            return Ok(());
+        }
+        let dir = self.workspace_dir(workspace)?;
+        let pair = |name: &str| {
+            let name = name.to_lowercase();
+            [
+                dir.join(format!("{name}.json")),
+                dir.join(format!("{name}.results.json")),
+            ]
+        };
+        let (sources, targets) = (pair(from), pair(to));
+
+        // Both targets are checked before either file moves, so a refusal can never leave the
+        // document under one name and its rows under another.
+        if targets.iter().any(|path| path.exists()) {
+            return Err(StorageError::Occupied);
+        }
+        for (source, target) in sources.iter().zip(&targets) {
+            if source.exists() {
+                std::fs::rename(source, target)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Moves a whole workspace directory, for a rename in the connection picker.
+    ///
+    /// # Errors
+    /// As [`DocumentStore::rename`].
+    ///
+    /// # Panics
+    /// Only if the store's base path has no parent, which `workspaces/<name>` always does.
+    pub fn rename_workspace(&self, from: &str, to: &str) -> Result<(), StorageError> {
+        if !self.mode.can_write() {
+            return Err(StorageError::ReadOnly);
+        }
+        if from.eq_ignore_ascii_case(to) {
+            return Ok(());
+        }
+        let target = self.base.join("workspaces").join(to.to_lowercase());
+        if target.exists() {
+            return Err(StorageError::Occupied);
+        }
+        // Resolving the source also lifts a legacy flat directory into `workspaces/` on the way
+        // past, so a rename cannot leave half an old install behind.
+        let source = self.workspace_dir(from)?;
+        std::fs::create_dir_all(target.parent().expect("workspaces dir has a parent"))?;
+        std::fs::rename(&source, &target)?;
+        Ok(())
     }
 
     fn document_path(&self, workspace: &str, connection: &str) -> Result<PathBuf, StorageError> {
@@ -232,6 +303,124 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// A store over a scratch base, with the files a connection would have left behind.
+    fn seeded(tag: &str) -> (DocumentStore, PathBuf) {
+        let base = scratch(tag).join("peek");
+        let dir = base.join("workspaces").join("plock");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("staging.json"), "{\"doc\":1}").unwrap();
+        std::fs::write(dir.join("staging.results.json"), "{\"rows\":1}").unwrap();
+        (
+            DocumentStore::with_base(base, PersistenceMode::ReadWrite),
+            dir,
+        )
+    }
+
+    /// The whole point of the divergence from the reference: the canvas follows its connection.
+    #[test]
+    fn renaming_a_connection_moves_its_document_and_its_rows() {
+        let (store, dir) = seeded("rename");
+
+        store.rename("plock", "staging", "preprod").unwrap();
+
+        assert!(!dir.join("staging.json").exists());
+        assert!(!dir.join("staging.results.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("preprod.json")).unwrap(),
+            "{\"doc\":1}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("preprod.results.json")).unwrap(),
+            "{\"rows\":1}"
+        );
+    }
+
+    /// Merging two canvases into one is not a rename. Nothing moves at all, so the refusal
+    /// cannot leave the document under one name and its rows under another.
+    #[test]
+    fn renaming_onto_an_existing_document_is_refused_before_anything_moves() {
+        let (store, dir) = seeded("occupied");
+        std::fs::write(dir.join("live.json"), "{\"other\":1}").unwrap();
+
+        let error = store.rename("plock", "staging", "live");
+
+        assert!(matches!(error, Err(StorageError::Occupied)), "{error:?}");
+        assert!(dir.join("staging.json").exists(), "the source stayed put");
+        assert!(dir.join("staging.results.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("live.json")).unwrap(),
+            "{\"other\":1}",
+            "the target was not overwritten"
+        );
+    }
+
+    /// A connection whose canvas was never opened has no files; renaming it is not an error.
+    #[test]
+    fn renaming_a_connection_with_no_files_is_a_no_op() {
+        let (store, dir) = seeded("absent");
+
+        store.rename("plock", "never-opened", "still-not").unwrap();
+
+        assert!(!dir.join("still-not.json").exists());
+    }
+
+    /// Paths are lowercased, so without the guard a change of case alone would move a file onto
+    /// itself and then find its own target occupied.
+    #[test]
+    fn renaming_to_the_same_name_in_another_case_changes_nothing() {
+        let (store, dir) = seeded("case");
+
+        store.rename("plock", "staging", "Staging").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("staging.json")).unwrap(),
+            "{\"doc\":1}"
+        );
+    }
+
+    #[test]
+    fn a_read_only_run_refuses_to_rename_anything() {
+        let (store, dir) = seeded("read-only");
+        let store = DocumentStore::with_base(store.base.clone(), PersistenceMode::ReadOnly);
+
+        assert!(matches!(
+            store.rename("plock", "staging", "preprod"),
+            Err(StorageError::ReadOnly)
+        ));
+        assert!(matches!(
+            store.rename_workspace("plock", "orchard"),
+            Err(StorageError::ReadOnly)
+        ));
+        assert!(dir.join("staging.json").exists());
+    }
+
+    #[test]
+    fn renaming_a_workspace_moves_the_whole_directory() {
+        let (store, dir) = seeded("workspace");
+        let base = store.base.clone();
+
+        store.rename_workspace("plock", "orchard").unwrap();
+
+        assert!(!dir.exists(), "the old workspace dir is gone");
+        let moved = base.join("workspaces").join("orchard");
+        assert_eq!(
+            std::fs::read_to_string(moved.join("staging.json")).unwrap(),
+            "{\"doc\":1}"
+        );
+    }
+
+    #[test]
+    fn renaming_a_workspace_onto_an_existing_one_is_refused() {
+        let (store, dir) = seeded("workspace-occupied");
+        std::fs::create_dir_all(store.base.join("workspaces").join("orchard")).unwrap();
+
+        assert!(matches!(
+            store.rename_workspace("plock", "orchard"),
+            Err(StorageError::Occupied)
+        ));
+        assert!(dir.join("staging.json").exists());
     }
 
     #[test]

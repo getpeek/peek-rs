@@ -2,7 +2,7 @@
 
 ## Principle
 
-One logical command = one gpui `Action` = one entry in `crates/peek-ui/src/commands/mod.rs`.
+One logical command = one gpui `Action` = one entry in `crates/peek-ui/src/commands/registry/`.
 Keyboard, palette, menus and buttons all dispatch that action; availability, title, group and
 default keys come from the one registry entry.
 
@@ -11,15 +11,24 @@ default keys come from the one registry entry.
 `crates/peek-ui/src/commands/actions.rs` declares one module per Peek group with
 `actions!(Group, [Variant, …])`. gpui names such an action `"Group::Variant"`, which is
 byte-identical to the ids Peek already uses in `settings.json`'s `keymap` and in
-`docs/keymap.md` of the Tauri app. `Edit::Copy` is `edit::CopySelection` to avoid shadowing the
-trait; its registry id can still be `"Edit::Copy"` when it lands.
+`docs/keymap.md` of the Tauri app. `Edit::Copy` lives in a nested `edit::copy` module because `Copy` shadows the marker
+trait inside the module that declares it; its id is still exactly `"Edit::Copy"`, which is what
+`settings.json` binds. Every action the build knows is declared here at once, including ones
+whose entry and handler land later — one file is the single place a name is coined.
 
 ## Registry
+
+Entries live one file per group under `commands/registry/`, collected by that module's
+`GROUPS`; `commands::all()` walks them and is what the palette, the keymap, the toolbar and the
+registry tests read. **Add a command by appending to its group's `ENTRIES` — never by rewriting
+the file.** A single array was a merge conflict every time two features landed at once, and
+reconstructing one from memory silently drops whatever else was in it.
 
 ```rust
 pub struct Command {
     pub id: &'static str,             // "Zoom::FitView"
-    pub title: &'static str,
+    pub title: &'static str,          // the stable name: tooltips, the keymap modal
+    pub label: Option<fn(&Scope) -> &'static str>, // palette label when it follows state
     pub group: Group,
     pub keywords: &'static str,       // palette search terms
     pub default_keys: &'static [&'static str], // Peek syntax ("meta-shift-0")
@@ -29,19 +38,48 @@ pub struct Command {
 }
 ```
 
+`label` is what makes a toggle name what pressing it *does* rather than what it controls —
+"Hide UI" against "Show UI". It takes a `Scope` and no `&App`, deliberately: that is what keeps
+the registry free of gpui. **The price is that any setting a label reads has to be projected
+into `Scope` first**, which is what `Scope::settings` (`SettingsScope`) exists for;
+`CanvasView::scope` fills it from the `Settings` global. Adding a stateful label to a new
+preference means adding a field there, not widening the signature.
+
 `Scope` (`peek-canvas/src/scope.rs`) is a handful of counters (`selected`, `selected_queries`,
 `pages`, `camera_locked`, …) computed by `Document::scope()`; the palette filters on it at open
 time and buttons may read it in render. Tests assert every `(build)().name() == id` and that every
 default key translates.
 
-Implemented ids so far: `Zoom::{In,Out,Reset,FitView,FitSelection}`, `Edit::SelectAll`,
-`Edit::DeleteSelection`, `History::{Undo,Redo}`, `Tool::Select` (escape → clear selection),
-`Tool::{Query,Agent,Text,Variable,Draw}`, `Page::{New,Close,Previous,Next}`,
-`Page::{GoToNode,SelectNodeLeft,SelectNodeRight,SelectNodeUp,SelectNodeDown}`,
-`Query::{Focus,Format,Run}`, `Edit::Copy`, `Page::Search`,
-`View::{ToggleCameraLock,ToggleUi}`, `Agent::{Fork,CycleMode,Stop}`, `CommandPalette::Open`,
-`Theme::Open`, `App::Quit`. The remaining keymap ids from
-`src-tauri/src/config/keymap.rs` are added as their features land.
+Implemented ids: `Zoom::{In,Out,Reset,FitView,FitSelection,FitSelectionAndLock}`,
+`Edit::{SelectAll,DeleteSelection,Copy}`, `History::{Undo,Redo}`,
+`Tool::Select` (escape → clear selection), `Tool::{Query,Agent,Text,Variable,Draw}`,
+`Page::{New,Close,Previous,Next,OpenPicker,GoToNode,Search}`,
+`Page::{SelectNodeLeft,SelectNodeRight,SelectNodeUp,SelectNodeDown}`,
+`Page::{SelectPreviousQuery,SelectNextQuery}`,
+`Query::{Focus,Format,Run,RerunAll,RerunSelected}`, `Result::Pivot`,
+`Export::{Csv,Json}`, `View::{ToggleCameraLock,ToggleUi,Organize,Schema}`,
+`Settings::{TogglePageDisplay,ToggleCommandPaletteButton}`, `Help::Keymap`,
+`Agent::{Fork,CycleMode,Stop}`, `CommandPalette::Open`, `Theme::Open`,
+`ConnectionPicker::Open`, `App::{About,Quit}`.
+
+`Page::GoTo` is the one **data-carrying** action (`GoTo { page: PageId }`, `no_json`). It has no
+registry entry and no default key: the palette generates one row per page, and there is nothing
+stable for a user to bind.
+
+Not implemented, each blocked on a feature rather than on the command:
+`Tool::LassoSelect` (no selection-tool state, no freehand `Interaction`, nothing to paint the
+path), `Region::{GroupSelection,UngroupSelection,OpenPicker}` (regions have a mutation API but
+no renderer), `View::ShowRunningQueries` (the Activity node is still a placeholder), the minimap
+and history-panel toggles, and the collaboration commands. Registering any of them now would put
+a row in the palette that does nothing, which is the failure the `Command`/handler pairing
+exists to prevent.
+
+`ConnectionPicker::Open` is the one command on `WORKSPACE_NOT_TYPING`: bare `p`, handled on
+`WorkspaceView` because switching a connection rebuilds the document, its pages, the rows sidecar
+and the autosave — none of which the canvas can reach. A `CANVAS`-scoped binding would only fire
+while the canvas subtree held focus, and the picker has to open from the title bar too. The
+`!Input` clause is also what lets a `p` typed into the picker's own search box insert a letter
+instead of toggling the panel shut.
 
 `History::{Undo,Redo}` are bound on `CANVAS`, which excludes `Input`, so
 gpui-kit's own `cmd-z` wins while a node editor has focus. `Tool::{Query,Agent,Text,Variable}` arm place
@@ -105,6 +143,54 @@ all three surfaces run one path.
 `WorkspaceView::new` focuses the canvas; the canvas element is `.id("canvas").test_support()
 .track_focus(&focus_handle).key_context("Canvas")`.
 
+## Where a handler lives
+
+Two facts about gpui's action dispatch decide this, and both cost real rework to learn.
+
+**Dispatch runs from the focused element outward through its ancestors, never inward.** The
+palette confirms through `WorkspaceView::canvas_focus`, so:
+
+- a handler on `WorkspaceView` **is** reachable from the palette — the canvas is a descendant of
+  it. `CommandPalette::Open`, `Theme::Open` and `ConnectionPicker::Open` all work this way.
+- a handler on a **node view is not** — nodes are children of the canvas. An action handled only
+  there is listed by the palette and then silently does nothing.
+
+So `canvas/dispatch/` holds the handlers for commands that act on the *selection or the
+document*, because `CanvasView` owns the document entity, `node_states` and the camera — not
+because it is the only reachable host. A node keeps its own handler where the command must also
+fire *while its editor has focus*; `Query::Run` and `Query::Format` have both, the node's
+winning on depth.
+
+**Actions stop propagating by default.** This is the opposite of mouse and key events, and it is
+easy to get backwards:
+
+```rust
+// gpui-pre-0.3.4/src/window.rs:6138
+cx.propagate_event = false; // Actions stop propagation by default during the bubble phase
+```
+
+Listeners run leaf→root and the first one ends the dispatch unless it calls `cx.propagate()`.
+A deeper handler therefore wins **without** `cx.stop_propagation()`, and adding one *to an
+`on_action`* is a no-op that reads as load-bearing — the next person copies it and treats its
+absence elsewhere as a bug. Pin the precedence with a test instead.
+
+**The trap next to the trap: the rule is per listener kind, not per file.** Actions stop by
+default; mouse and key events do not. A `stop_propagation` in an `on_click` is usually the only
+thing keeping a nested control from also firing its parent — the connection picker's pencil and
+duplicate buttons sit inside a row whose own click switches connections, and without it, editing
+a connection would switch to it as a side effect (`opening_the_form_does_not_switch_to_the_connection`
+pins that). So: delete one from an `on_action`, keep one in an `on_click`, and never move a call
+between the two without re-reading which kind of listener it now sits in. `Page::Search` is the worked example: one registry
+entry on `CANVAS_NOT_TYPING`, a page-wide handler on the canvas, and a result-node handler that
+wins when the table has focus — except in the record view, where it calls `cx.propagate()` to
+hand the key on. The pair of tests in `node/result/mod.rs` is what makes that invariant legible,
+and the `cx.propagate()` call is the only difference between them.
+
+This also closes a dead zone in the reference, which arbitrates the same key with two
+independent listeners whose guards (`selected && !pivoted`, and `nothing selected`) are not
+complementary: with a pivoted result selected, both decline and `⌘F` does nothing. Here the
+discriminator is focus, so exactly one handler always runs.
+
 ## Binding at startup
 
 `commands::keymap::resolved(overrides)` seeds a map from every registry default key (translated
@@ -130,8 +216,16 @@ happily accept the unmatchable spelling and dispatch it.
 
 ## Surfaces
 
-- **Palette** (`WorkspaceView::open_palette`): snapshots `Scope`, builds `CommandItem`s from
-  available commands, opens a gpui-component `Command` inside a `Dialog`. Confirm closes the
+- **Palette** (`WorkspaceView::open_palette`): snapshots `Scope`, then asks
+  `commands::palette::entries(document, &scope)` for a `Vec<PaletteEntry>` — registry commands
+  that pass `available`, each carrying its `label(scope)`, followed by whatever the `DYNAMIC`
+  providers append. A `PaletteEntry` is `{ title, keywords, action: Box<dyn Action> }`, which is
+  what lets a runtime-generated row (one "Go to <page>" per page) sit in the same list as a
+  static one and dispatch the same way. Registering a provider is all a feature needs to do.
+  **Generate rows sparingly**: the reference's palette returns nothing for an empty query and is
+  search-only, so a row per connection or per node would swamp a surface nobody browses — "Change
+  connection" is deliberately one row that opens the picker. It then builds `CommandItem`s and
+  opens a gpui-component `Command` inside a `Dialog`. Confirm closes the
   dialog first, then dispatches through `canvas_focus.dispatch_action` so the action reaches the
   canvas handlers rather than the dialog's focus. Dialogs only render because `WorkspaceView`
   mounts `Root::render_dialog_layer` (and sheet/notification layers) — `Root` itself does not.

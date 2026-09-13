@@ -18,7 +18,7 @@ pub(super) static PAPER: ThemeSpec = ThemeSpec {
     is_light: true,
 
     bg: Color::rgb(0xfaf4ed),
-    bg_grid: Color::rgb(0xdfdad9),
+    bg_grid: Color::rgba(0x57527926), // CanvasBackground.tsx: #575279 / 0.15
     canvas: CanvasBackground {
         base: Color::rgb(0xfaf4ed),
         gradient: Some((Color::rgb(0xfffaf3), Color::rgb(0xfaf4ed))),

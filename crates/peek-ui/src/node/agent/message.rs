@@ -6,17 +6,65 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::marker::Marker;
-use gpui_kit::component::text::TextView;
+use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::component::{Icon, StyledExt};
 use gpui_kit::prelude::*;
-use gpui_kit::{AnyElement, App, Hsla, SharedString, div, px, rems};
+use gpui_kit::{
+    AnyElement, App, HighlightStyle, Hsla, SharedString, StyleRefinement, Window, div, px, rems,
+};
 use peek_document::{AgentMessage, NodeType};
 use peek_theme::ActivePeekTheme;
 
+use crate::node::scaled;
+
 use super::plan_block;
 
+/// `.message-content h1` … `h4` in the reference's `agent.css`, as fractions of the rem the node
+/// chrome is designed against.
+fn heading_rems(level: u8) -> f32 {
+    match level {
+        1 => 1.0,
+        2 => 0.906_25,
+        3 => 0.8125,
+        _ => 0.75,
+    }
+}
+
+/// The markdown prose style: `.message-content` and the rules under it.
+///
+/// Everything gpui-base takes in rems follows the camera on its own. Two things do not — it
+/// derives a heading's size from a pixel base, and a code fence from the theme's mono size — and
+/// those are the ones that render a heading at full size inside a node drawn at a third of it.
+fn markdown_style(window: &Window, cx: &App) -> TextViewStyle {
+    let theme = cx.peek_theme();
+    let rem = window.rem_size();
+    let code_block = StyleRefinement::default()
+        .px(rems(0.75))
+        .py(rems(0.5))
+        .text_size(rems(0.75))
+        .bg(theme.node_inset)
+        .border_1()
+        .border_color(theme.node_border)
+        .rounded(scaled(theme.radius_card));
+
+    TextViewStyle::default()
+        .paragraph_gap(rems(0.625))
+        .heading_font_size(move |level, _| px(heading_rems(level) * f32::from(rem)))
+        .code_block(code_block)
+        .inline_code(HighlightStyle {
+            color: Some(theme.accent_soft),
+            background_color: Some(theme.node_inset),
+            ..HighlightStyle::default()
+        })
+}
+
 /// A conversational turn: a role line, then the message as markdown.
-pub(super) fn turn(id: SharedString, message: &AgentMessage, cx: &App) -> AnyElement {
+pub(super) fn turn(
+    id: SharedString,
+    message: &AgentMessage,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.peek_theme();
     let assistant = !message.is("user");
     let (dot, label) = if assistant {
@@ -46,11 +94,9 @@ pub(super) fn turn(id: SharedString, message: &AgentMessage, cx: &App) -> AnyEle
                         .child(label.to_uppercase()),
                 ),
         )
-        .child(
-            div()
-                .text_color(theme.fg)
-                .child(TextView::markdown(id, message.message.clone())),
-        )
+        .child(div().text_color(theme.fg).child(
+            TextView::markdown(id, message.message.clone()).style(markdown_style(window, cx)),
+        ))
         .into_any_element()
 }
 
@@ -58,9 +104,11 @@ pub(super) fn turn(id: SharedString, message: &AgentMessage, cx: &App) -> AnyEle
 /// reads at a glance as alternating speakers.
 fn role_dot(color: Hsla, glow: bool, cx: &App) -> impl IntoElement {
     div()
-        .size(px(6.0))
+        .size(rems(0.375))
         .rounded_full()
         .bg(color)
+        // The one place a pixel constant survives the camera: gpui box shadows take
+        // `Pixels`, with no rem-relative form to scale the glow with the zoom.
         .when(glow, |this| {
             this.shadow(vec![gpui_kit::BoxShadow {
                 color: cx.peek_theme().accent_line,
@@ -115,14 +163,14 @@ pub(super) fn chip(message: &AgentMessage, context_updated: bool, cx: &App) -> A
     Marker::new()
         .child(
             div()
-                .size(px(24.0))
+                .size(rems(1.5))
                 .flex_shrink_0()
-                .rounded(theme.radius_card)
+                .rounded(scaled(theme.radius_card))
                 .bg(background)
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(Icon::new(icon).size(px(14.0)).text_color(tint)),
+                .child(Icon::new(icon).size(rems(0.875)).text_color(tint)),
         )
         .child(
             div()
@@ -151,11 +199,12 @@ pub(super) fn render(
     id: SharedString,
     message: &AgentMessage,
     context_updated: bool,
+    window: &Window,
     cx: &App,
 ) -> AnyElement {
     match message.kind.as_str() {
         "plan" => plan_block::render(message.plan_entries.as_deref().unwrap_or_default(), cx),
         "context" | "thought" | "system" => chip(message, context_updated, cx),
-        _ => turn(id, message, cx),
+        _ => turn(id, message, window, cx),
     }
 }

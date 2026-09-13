@@ -142,7 +142,7 @@ fn fork_button(id: &NodeId, document: &Entity<Document>) -> AnyElement {
     Button::new(SharedString::from(format!("{id}-fork")))
         .ghost()
         .tooltip("Fork conversation")
-        .child(Icon::new(gpui_kit::assets::IconName::GitFork).size(gpui_kit::px(12.0)))
+        .child(Icon::new(gpui_kit::assets::IconName::GitFork).size(gpui_kit::rems(0.75)))
         .on_click(move |_, window, cx| {
             // Select this node first: the handler forks the selection, so a click on a node that
             // is not selected would otherwise fork whichever one happened to be. Dispatching
@@ -164,6 +164,7 @@ fn render_row(
     messages: &Rc<Vec<AgentMessage>>,
     state: (usize, &HashSet<SharedString>, bool),
     view: WeakEntity<AgentView>,
+    window: &Window,
     cx: &mut App,
 ) -> AnyElement {
     let (index, expanded, loading) = state;
@@ -188,6 +189,7 @@ fn render_row(
                 SharedString::from(format!("agent-md-{index}")),
                 message,
                 *context_updated,
+                window,
                 cx,
             )
         }
@@ -202,6 +204,7 @@ fn render_row(
                 message::turn(
                     SharedString::from(format!("agent-tool-preamble-{index}")),
                     message,
+                    window,
                     cx,
                 )
             });

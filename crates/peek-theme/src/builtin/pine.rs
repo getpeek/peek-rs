@@ -19,8 +19,8 @@ pub(super) static PINE: ThemeSpec = ThemeSpec {
     tagline: "Purple-tinted dark",
     is_light: false,
 
-    bg: Color::rgb(0x04040f),      // oklch(11.5% 0.028 280)
-    bg_grid: Color::rgb(0x1f2138), // oklch(25.8% 0.043 279.1)
+    bg: Color::rgb(0x04040f),         // oklch(11.5% 0.028 280)
+    bg_grid: Color::rgba(0xe6e4f51f), // fg / 0.12
     canvas: CanvasBackground {
         base: Color::rgb(0x02020a), // oklch(9% 0.03 281)
         gradient: Some((Color::rgb(0x090917), Color::rgb(0x03030e))),

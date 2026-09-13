@@ -1,5 +1,9 @@
 //! Action types, one module per Peek group so short names never collide. `actions!` names
 //! each one `"Group::Variant"`, byte-identical to the ids in `settings.json`'s keymap.
+//!
+//! Every action this build knows is declared here, including ones whose registry entry and
+//! handler land later: declaring them together keeps one file the single place a name is
+//! coined, and an action with no entry is simply never bound.
 
 use gpui_kit::actions;
 
@@ -30,7 +34,10 @@ pub mod history {
 
 pub mod zoom {
     use super::actions;
-    actions!(Zoom, [In, Out, Reset, FitView, FitSelection]);
+    actions!(
+        Zoom,
+        [In, Out, Reset, FitView, FitSelection, FitSelectionAndLock]
+    );
 }
 
 pub mod page {
@@ -48,9 +55,21 @@ pub mod page {
             SelectNodeLeft,
             SelectNodeRight,
             SelectNodeUp,
-            SelectNodeDown
+            SelectNodeDown,
+            SelectPreviousQuery,
+            SelectNextQuery
         ]
     );
+
+    /// Switching to one named page. Data-carrying, so unlike everything else here it has no
+    /// registry entry and no default key: the palette generates one row per page, and there is
+    /// nothing stable for a user to bind. `no_json` keeps it out of the keymap schema for the
+    /// same reason.
+    #[derive(Clone, PartialEq, Eq, Debug, gpui_kit::Action)]
+    #[action(namespace = Page, no_json)]
+    pub struct GoTo {
+        pub page: peek_document::PageId,
+    }
 }
 
 /// Query-node commands. `Format` is dispatched while the SQL editor holds focus, which is why
@@ -58,7 +77,13 @@ pub mod page {
 /// fires from the canvas and hands focus *to* the editor.
 pub mod query {
     use super::actions;
-    actions!(Query, [Format, Focus, Run]);
+    actions!(Query, [Format, Focus, Run, RerunAll, RerunSelected]);
+}
+
+/// Result-node commands.
+pub mod result {
+    use super::actions;
+    actions!(Result, [Pivot]);
 }
 
 /// Agent-node commands. `CycleMode` and `Stop` fire while the composer holds focus, which is
@@ -70,7 +95,22 @@ pub mod agent {
 
 pub mod view {
     use super::actions;
-    actions!(View, [ToggleUi, ToggleCameraLock]);
+    actions!(View, [ToggleUi, ToggleCameraLock, Organize, Schema]);
+}
+
+pub mod export {
+    use super::actions;
+    actions!(Export, [Csv, Json]);
+}
+
+pub mod settings {
+    use super::actions;
+    actions!(Settings, [ToggleCommandPaletteButton, TogglePageDisplay]);
+}
+
+pub mod help {
+    use super::actions;
+    actions!(Help, [Keymap]);
 }
 
 pub mod command_palette {
@@ -78,9 +118,14 @@ pub mod command_palette {
     actions!(CommandPalette, [Open]);
 }
 
+pub mod connection_picker {
+    use super::actions;
+    actions!(ConnectionPicker, [Open]);
+}
+
 pub mod app {
     use super::actions;
-    actions!(App, [Quit]);
+    actions!(App, [Quit, About]);
 }
 
 pub mod theme {

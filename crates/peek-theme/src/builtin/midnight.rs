@@ -18,8 +18,8 @@ pub(super) static MIDNIGHT: ThemeSpec = ThemeSpec {
     tagline: "Pure dark",
     is_light: false,
 
-    bg: Color::rgb(0x0e0d12),      // oklch(16.3% 0.011 294.4)
-    bg_grid: Color::rgb(0x1a1822), // oklch(21.6% 0.02 293.9)
+    bg: Color::rgb(0x0e0d12),         // oklch(16.3% 0.011 294.4)
+    bg_grid: Color::rgba(0xffffff1f), // CanvasBackground.tsx: white, dialled back to 0.12
     canvas: CanvasBackground {
         base: Color::rgb(0x0e0d12),
         gradient: Some((Color::rgb(0x14121a), Color::rgb(0x0e0d12))),

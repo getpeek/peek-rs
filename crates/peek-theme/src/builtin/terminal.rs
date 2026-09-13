@@ -20,7 +20,7 @@ pub(super) static TERMINAL: ThemeSpec = ThemeSpec {
     is_light: false,
 
     bg: Color::rgb(0x000000),
-    bg_grid: Color::rgb(0x161616),
+    bg_grid: Color::rgba(0xffffff1f),
     canvas: CanvasBackground {
         base: Color::rgb(0x000000),
         gradient: None,

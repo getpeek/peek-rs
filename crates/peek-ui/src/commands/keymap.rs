@@ -8,7 +8,7 @@ use std::rc::Rc;
 use gpui_kit::{App, KeyBinding, KeyBindingContextPredicate};
 use peek_config::gpui_keystroke;
 
-use super::{COMMANDS, Command, find};
+use super::{Command, all, find};
 
 /// Defaults from the registry with the user's overrides applied by key. Unknown action ids
 /// and unparsable combos are logged and skipped so one typo never drops the rest
@@ -21,7 +21,7 @@ pub fn resolved<S: BuildHasher>(
     overrides: &HashMap<String, String, S>,
 ) -> BTreeMap<String, &'static Command> {
     let mut resolved = BTreeMap::new();
-    for command in COMMANDS {
+    for command in all() {
         for combo in command.default_keys {
             let key = gpui_keystroke(combo).expect("registry default keys are valid");
             resolved.insert(key, command);

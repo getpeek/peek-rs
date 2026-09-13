@@ -104,6 +104,48 @@ impl Session {
         })
     }
 
+    /// Opens `url` once to see whether it answers, then throws the connection away.
+    ///
+    /// This is the connection form's Test button, and it must not disturb what the canvas is
+    /// querying: it never locks `Inner`, so it neither replaces the open connection nor queues
+    /// behind a long-running statement.
+    pub fn probe(
+        &self,
+        url: String,
+        tunnel: Option<TunnelConfig>,
+        policy: HostKeyPolicy,
+    ) -> Pending<Engine> {
+        self.spawn(move |_| async move {
+            let (url, opened) = match tunnel {
+                // Port 0, whatever the config says. `local_port` is a fixed number several
+                // connections routinely share, and the live tunnel is already holding it — a
+                // probe that asked for the same port would fail to bind and report a false
+                // negative about a database that is perfectly reachable. An OS-picked port also
+                // means a tunnel dropped on the error path below cannot collide with anything.
+                Some(config) => {
+                    let config = TunnelConfig {
+                        local_port: 0,
+                        ..config
+                    };
+                    let (url, tunnel) = open_tunnel(&url, &config, policy).await?;
+                    (url, Some(tunnel))
+                }
+                None => (url, None),
+            };
+
+            // The connection is dropped at the end of this block, before the tunnel it runs
+            // through is closed underneath it.
+            let engine = {
+                let connection = Connection::open(&url).await?;
+                connection.engine()
+            };
+            if let Some(tunnel) = opened {
+                tunnel.close().await;
+            }
+            Ok(engine)
+        })
+    }
+
     pub fn query(&self, sql: String) -> Pending<ResultSet> {
         self.spawn(move |inner| async move {
             let mut inner = inner.lock().await;
@@ -201,5 +243,23 @@ mod tests {
     #[test]
     fn a_fresh_session_is_not_connected() {
         assert!(!Session::new().unwrap().is_connected());
+    }
+
+    /// The Test button must never cost the canvas its connection. A probe that fails has to
+    /// leave the session exactly as it found it — here, still unconnected rather than holding a
+    /// broken connection the next query would trip over.
+    #[test]
+    fn a_failed_probe_leaves_the_session_alone() {
+        let session = Session::new().unwrap();
+        let pending = session.probe(
+            "postgres://nobody@127.0.0.1:1/none".to_string(),
+            None,
+            crate::tunnel::HostKeyPolicy::TrustOnFirstUse,
+        );
+
+        let result = session.runtime.block_on(pending).unwrap();
+
+        assert!(result.is_err(), "nothing is listening on port 1");
+        assert!(!session.is_connected());
     }
 }

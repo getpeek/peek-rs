@@ -8,9 +8,11 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{Icon, StyledExt};
 use gpui_kit::prelude::*;
-use gpui_kit::{AnyElement, Context, SharedString, div, px, rems};
+use gpui_kit::{AnyElement, Context, SharedString, div, rems};
 use peek_acp::PermissionRequest;
 use peek_theme::ActivePeekTheme;
+
+use crate::node::scaled;
 
 use super::acp;
 use super::view::AgentView;
@@ -35,7 +37,7 @@ pub(super) fn render(request: &PermissionRequest, cx: &mut Context<AgentView>) -
         .mx(rems(0.5))
         .mb(rems(0.4))
         .p(rems(0.6))
-        .rounded(theme.radius_card)
+        .rounded(scaled(theme.radius_card))
         .bg(theme.node_inset)
         .border_1()
         .border_color(theme.accent_line)
@@ -46,7 +48,7 @@ pub(super) fn render(request: &PermissionRequest, cx: &mut Context<AgentView>) -
                 .gap(rems(0.35))
                 .child(
                     Icon::new(IconName::ShieldAlert)
-                        .size(px(15.0))
+                        .size(rems(0.9375))
                         .text_color(theme.accent_soft),
                 )
                 .child(

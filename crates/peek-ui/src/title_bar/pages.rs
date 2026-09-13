@@ -5,24 +5,69 @@
 //! position-dependent. It also has no close affordance and no reorder, and its variant tables
 //! set their own height, padding and radius — we would be overriding every visual decision to
 //! reuse a click handler. The reference's tabs are pills, not tabs.
+//!
+//! `ui.pages.show_as` picks between the strip and a single pill that opens the page list
+//! (`PagesMenu.tsx`). `Settings::TogglePageDisplay` flips it, and this view observes the
+//! settings global so the bar follows without `WorkspaceView` knowing anything about it.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui_kit::TestSupportExt;
+use gpui_kit::assets::IconName;
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{Sizable, StyledExt};
+use gpui_kit::component::kbd::Kbd;
+use gpui_kit::component::popover::Popover;
+use gpui_kit::component::{Icon, Sizable, StyledExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    App, BoxShadow, ClickEvent, Context, Entity, FocusHandle, FontWeight, KeyDownEvent,
-    SharedString, Subscription, Window, div, point, px, rems,
+    AnyElement, App, BoxShadow, ClickEvent, Context, Entity, FocusHandle, FontWeight, Global,
+    KeyDownEvent, SharedString, Subscription, Window, div, point, px, rems,
 };
+use peek_config::PageDisplay;
 use peek_document::PageId;
 use peek_theme::ActivePeekTheme;
 
 use crate::canvas::CanvasView;
 use crate::commands::actions;
+use crate::settings::Settings;
+
+/// Whether the pages picker is open.
+///
+/// A global rather than a field on [`PageTabs`] because the two things that open it are in
+/// different subtrees: the pill lives in the title bar, while `Page::OpenPicker` is dispatched
+/// through the canvas focus handle and never reaches it. The reference shares a jotai atom
+/// (`pagesMenuOpenAtom`) between the same two callers for the same reason.
+#[derive(Debug, Default)]
+pub(crate) struct PagesMenu {
+    open: bool,
+}
+
+impl Global for PagesMenu {}
+
+impl PagesMenu {
+    pub(crate) fn is_open(cx: &App) -> bool {
+        cx.try_global::<Self>().is_some_and(|menu| menu.open)
+    }
+
+    pub(crate) fn toggle(cx: &mut App) {
+        Self::set(!Self::is_open(cx), cx);
+    }
+
+    pub(crate) fn close(cx: &mut App) {
+        Self::set(false, cx);
+    }
+
+    /// Guarded because every write notifies observers, and the popover writes back its own
+    /// state on open and close — an unguarded set would repaint the bar for no change.
+    fn set(open: bool, cx: &mut App) {
+        if Self::is_open(cx) == open {
+            return;
+        }
+        cx.update_default_global::<Self, ()>(|menu, _| menu.open = open);
+    }
+}
 
 /// One frame's view of a page, snapshotted so the document borrow ends before the listeners
 /// that need `&mut Context` are built.
@@ -52,7 +97,14 @@ pub(crate) struct PageTabs {
     /// Chrome dispatches through the canvas, so buttons take the same path the keyboard does.
     canvas_focus: FocusHandle,
     rename: Option<Rename>,
+    /// The picker's own handle, handed to the popover so the list is what the arrow keys reach.
+    /// Without it the popover focuses a handle of its own and every key listener below sits off
+    /// the focus path, which dispatch never walks into.
+    picker_focus: FocusHandle,
+    /// Which row the picker's arrow keys are on.
+    picker_cursor: usize,
     _document: Subscription,
+    _globals: [Subscription; 2],
 }
 
 impl std::fmt::Debug for PageTabs {
@@ -60,6 +112,7 @@ impl std::fmt::Debug for PageTabs {
         formatter
             .debug_struct("PageTabs")
             .field("renaming", &self.rename.is_some())
+            .field("picker_cursor", &self.picker_cursor)
             .finish_non_exhaustive()
     }
 }
@@ -74,12 +127,35 @@ impl PageTabs {
         // tabs showing a stale page list.
         let document = canvas.read(cx).document().clone();
         let subscription = cx.observe(&document, |_, _, cx| cx.notify());
+        // The display mode and the picker's open state both live outside this view, so both
+        // need an observer: nothing else in the title bar would repaint it.
+        let settings = cx.observe_global::<Settings>(|_, cx| cx.notify());
+        let picker = cx.observe_global::<PagesMenu>(|this, cx| {
+            // Every open starts on the page you are looking at, as the reference's cursor reset
+            // does — whether the popover was clicked or `o` was pressed.
+            if PagesMenu::is_open(cx) {
+                this.picker_cursor = this.active_index(cx);
+            }
+            cx.notify();
+        });
         Self {
             canvas,
             canvas_focus,
             rename: None,
+            picker_focus: cx.focus_handle(),
+            picker_cursor: 0,
             _document: subscription,
+            _globals: [settings, picker],
         }
+    }
+
+    fn active_index(&self, cx: &App) -> usize {
+        let document = self.canvas.read(cx).document().read(cx);
+        let active = document.active_page_id();
+        document
+            .pages()
+            .position(|page| &page.id == active)
+            .unwrap_or_default()
     }
 
     fn rows(&self, cx: &App) -> Vec<PageRow> {
@@ -291,7 +367,18 @@ fn add_button(canvas_focus: &FocusHandle) -> impl IntoElement {
 }
 
 impl Render for PageTabs {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Copied out: the rest of this frame needs `cx` mutably, and the config borrow holds it.
+        let display = Settings::get(cx).ui.pages.show_as;
+        match display {
+            PageDisplay::Tabs => self.tab_strip(cx).into_any_element(),
+            PageDisplay::List => self.picker(window, cx).into_any_element(),
+        }
+    }
+}
+
+impl PageTabs {
+    fn tab_strip(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = self.rows(cx);
         let renaming = self.rename.as_ref().map(|rename| rename.page.clone());
 
@@ -313,4 +400,175 @@ impl Render for PageTabs {
             }))
             .child(add_button(&self.canvas_focus))
     }
+
+    /// List mode: one pill naming the active page, and the page list behind it.
+    fn picker(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = self.rows(cx);
+        let label = rows
+            .iter()
+            .find(|row| row.active)
+            .map_or_else(|| SharedString::new_static("Pages"), |row| row.name.clone());
+        let badge =
+            Kbd::binding_for_action_in(&actions::page::OpenPicker, &self.canvas_focus, window);
+        let list = cx.entity();
+
+        div().id("page-picker").test_support().child(
+            Popover::new("pages-menu")
+                .open(PagesMenu::is_open(cx))
+                // Controlled, so the click on the pill and the `o` key write to the one place
+                // both read from.
+                .on_open_change(|open, _, cx| PagesMenu::set(*open, cx))
+                .track_focus(&self.picker_focus)
+                .trigger(pill(label, badge, cx))
+                .content(move |_, _, cx| {
+                    list.update(cx, |this, cx| this.page_list(cx).into_any_element())
+                }),
+        )
+    }
+
+    fn page_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = self.rows(cx);
+        let cursor = self.picker_cursor.min(rows.len().saturating_sub(1));
+        let theme = cx.peek_theme();
+
+        div()
+            .id("pages-list")
+            .test_support()
+            .track_focus(&self.picker_focus)
+            .on_key_down(cx.listener(Self::on_picker_key))
+            .v_flex()
+            .gap(px(2.0))
+            .min_w(rems(13.0))
+            .text_xs()
+            .child(
+                div()
+                    .h_flex()
+                    .justify_between()
+                    .items_center()
+                    .pb_1()
+                    .text_color(theme.fg_subtle)
+                    .child("Pages")
+                    .child(add_button(&self.canvas_focus)),
+            )
+            .children(
+                rows.iter()
+                    .enumerate()
+                    .map(|(index, row)| self.page_row(row, index == cursor, cx)),
+            )
+    }
+
+    fn page_row(&self, row: &PageRow, under_cursor: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.peek_theme();
+        let dot_color = if row.active {
+            theme.green
+        } else {
+            theme.fg_subtle
+        };
+        let id = row.id.clone();
+
+        div()
+            .id(SharedString::from(format!("page-row-{}", row.id)))
+            .test_support()
+            .h_flex()
+            .gap(px(8.0))
+            .px_2()
+            .py_1()
+            .rounded(theme.radius_card)
+            .when(under_cursor, |this| this.bg(theme.node_bg_2))
+            .text_color(if row.active { theme.fg } else { theme.fg_muted })
+            .child(
+                div()
+                    .size(rems(0.375))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .when(row.active, |this| this.bg(dot_color))
+                    .when(!row.active, |this| this.border_1().border_color(dot_color)),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(row.name.clone()))
+            .when(row.closable, |this| {
+                this.child(close_button(row, &self.canvas_focus))
+            })
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.choose_page(&id, cx);
+            }))
+            .into_any_element()
+    }
+
+    /// The reference's list hotkeys: the arrows walk it, Enter takes the row. Escape belongs to
+    /// the popover, which binds `Cancel` on the context it owns.
+    fn on_picker_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let last = self
+            .canvas
+            .read(cx)
+            .document()
+            .read(cx)
+            .page_count()
+            .saturating_sub(1);
+        match event.keystroke.key.as_str() {
+            "up" => self.picker_cursor = self.picker_cursor.saturating_sub(1),
+            "down" => self.picker_cursor = (self.picker_cursor + 1).min(last),
+            "enter" => {
+                if let Some(id) = self.page_at_cursor(cx) {
+                    self.choose_page(&id, cx);
+                }
+            }
+            _ => return,
+        }
+        // Enter is also the popover's own `Confirm`, which toggles it: without this the row is
+        // chosen, the menu closes, and then the popover opens it straight back up.
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn page_at_cursor(&self, cx: &App) -> Option<PageId> {
+        self.canvas
+            .read(cx)
+            .document()
+            .read(cx)
+            .pages()
+            .nth(self.picker_cursor)
+            .map(|page| page.id.clone())
+    }
+
+    fn choose_page(&mut self, id: &PageId, cx: &mut Context<Self>) {
+        self.canvas
+            .update(cx, |canvas, cx| canvas.switch_to_page(id, cx));
+        PagesMenu::close(cx);
+        cx.notify();
+    }
+}
+
+/// `.pages-pill`: the list-mode trigger. As with the connection pill the surface sits on an
+/// inner element, because `Button::render` already sets a hover style and gpui allows one.
+fn pill(label: SharedString, badge: Option<Kbd>, cx: &App) -> Button {
+    let theme = cx.peek_theme();
+    Button::new("pages-pill")
+        .ghost()
+        .xsmall()
+        .p_0()
+        .child(
+            div()
+                .h_flex()
+                .gap(px(6.0))
+                .px_3()
+                .py_1()
+                .max_w(rems(15.0))
+                .rounded(theme.radius_pill)
+                .border_1()
+                .border_color(theme.node_border)
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.fg)
+                .child(
+                    div()
+                        .size(rems(0.375))
+                        .flex_shrink_0()
+                        .rounded_full()
+                        .bg(theme.green),
+                )
+                .child(div().min_w_0().truncate().child(label))
+                .child(Icon::new(IconName::ChevronDown).size(px(8.0)))
+                .children(badge),
+        )
+        .tooltip("Pages")
 }

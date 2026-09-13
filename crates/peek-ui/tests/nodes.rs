@@ -1358,6 +1358,37 @@ fn typing_in_a_query_editor_writes_through_to_the_document(cx: &mut TestAppConte
     assert_eq!(sql_data(cx, &workspace).query, "select 1 + 1");
 }
 
+/// `cmd-enter` runs the query. gpui-kit's `Input` context binds the same keystroke to its own
+/// `Enter`, which in a multi-line editor inserts a newline — and wins on depth unless
+/// `Query::Run` names `Input` too. The observable is the text: a newline would reach the
+/// document through the editor's change event.
+#[gpui_kit::test]
+fn cmd_enter_runs_the_query_instead_of_breaking_the_line(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx, SQL_DOCUMENT);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click(sql_body(), cx);
+        window.press("cmd-enter", cx);
+    })
+    .unwrap();
+
+    assert_eq!(sql_data(cx, &workspace).query, "select 1");
+}
+
+/// Plain `enter` still breaks the line: the editor is multi-line and the reference's is too.
+#[gpui_kit::test]
+fn enter_still_breaks_the_line_in_the_editor(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx, SQL_DOCUMENT);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click(sql_body(), cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+
+    assert_eq!(sql_data(cx, &workspace).query, "select 1\n");
+}
+
 #[gpui_kit::test]
 fn formatting_a_query_rewrites_it_in_the_document(cx: &mut TestAppContext) {
     let json = SQL_DOCUMENT.replace(

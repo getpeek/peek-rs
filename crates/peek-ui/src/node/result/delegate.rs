@@ -6,6 +6,7 @@
 //! presentation.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{Input, InputState};
@@ -31,8 +32,12 @@ use super::widths::ColumnWidths;
 pub(super) const ROW_HEIGHT: f64 = 34.0;
 
 pub(crate) struct ResultDelegate {
-    rows: ResultSet,
+    /// Shared with the sidecar rather than copied: the canvas hands this over on every frame,
+    /// so owning a copy meant cloning every cell of every visible result, every frame.
+    rows: Arc<ResultSet>,
     widths: ColumnWidths,
+    /// The widths the document asked for, kept so a frame can tell a real change from a repeat.
+    explicit: Option<BTreeMap<String, f64>>,
     /// World units the body has to spend, so narrow columns can be stretched to fill it.
     available: f64,
     /// Pixels per world unit. Columns are sized in pixels, which do not scale with the rem
@@ -48,6 +53,10 @@ pub(crate) struct ResultDelegate {
     /// What each column is — a key, a reference, or neither — and what it points at. Recomputed
     /// only when the columns or the schema change; it never moves on its own.
     roles: Vec<ColumnRole>,
+    /// The record view: rows become fields and each visible row becomes a column. Held here
+    /// rather than read from the node's data on every call because every index in the
+    /// `TableDelegate` impl means something different depending on it.
+    pivoted: bool,
     /// The cell whose full value the detail pane is showing.
     detail: Option<(usize, usize)>,
     /// The cell being edited, by **data** row and column, with whatever the last commit said.
@@ -58,6 +67,25 @@ pub(crate) struct ResultDelegate {
     /// The field the in-cell editor renders. One per table, reused for whichever cell is open:
     /// `render_td` may not create entities, so it has to exist before editing starts.
     input: Entity<InputState>,
+}
+
+/// What one [`ResultDelegate::adopt`] actually changed.
+///
+/// Three answers rather than one boolean because they have different consequences: only new
+/// rows can restale the column roles, only new widths need re-resolving, and a pure zoom needs
+/// nothing but the pixel conversion the table caches in its column groups.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Adopted {
+    pub(super) rows_changed: bool,
+    pub(super) widths_changed: bool,
+    pub(super) scale_changed: bool,
+}
+
+impl Adopted {
+    /// Whether `TableState`'s cached column groups still hold the right pixel widths.
+    pub(super) fn needs_refresh(self) -> bool {
+        self.widths_changed || self.scale_changed
+    }
 }
 
 /// A cell open for editing.
@@ -84,7 +112,7 @@ impl std::fmt::Debug for ResultDelegate {
 
 impl ResultDelegate {
     pub(super) fn new(
-        rows: ResultSet,
+        rows: Arc<ResultSet>,
         explicit: Option<&BTreeMap<String, f64>>,
         input: Entity<InputState>,
     ) -> Self {
@@ -93,11 +121,13 @@ impl ResultDelegate {
         Self {
             rows,
             widths,
+            explicit: explicit.cloned(),
             available: 0.0,
             scale: 1.0,
             selection: Selection::default(),
             matches: Matches::unfiltered(row_count),
             roles: Vec::new(),
+            pivoted: false,
             detail: None,
             editing: None,
             input,
@@ -149,6 +179,16 @@ impl ResultDelegate {
         window.defer(cx, move |window, cx| {
             owner.update(cx, |owner, cx| owner.begin_edit(row, column, window, cx));
         });
+    }
+
+    /// The in-cell editor, when this is the cell being edited. One field is reused for whichever
+    /// cell is open, because `render_td` may not create entities.
+    fn open_editor(&self, row: usize, column: usize) -> Option<Input> {
+        let editing = self
+            .editing
+            .as_ref()
+            .filter(|edit| edit.row == row && edit.column == column)?;
+        Some(Input::new(&self.input).xsmall().disabled(editing.saving))
     }
 
     pub(super) fn begin_edit(&mut self, row: usize, column: usize) {
@@ -226,6 +266,23 @@ impl ResultDelegate {
         });
     }
 
+    pub(super) fn is_pivoted(&self) -> bool {
+        self.pivoted
+    }
+
+    /// Adopts the node's pivot flag, dropping everything whose coordinates the transposition
+    /// invalidates. Returns whether it changed, because the table has to re-read its columns.
+    pub(super) fn set_pivoted(&mut self, pivoted: bool) -> bool {
+        if self.pivoted == pivoted {
+            return false;
+        }
+        self.pivoted = pivoted;
+        self.selection.clear();
+        self.detail = None;
+        self.editing = None;
+        true
+    }
+
     /// The cell the detail pane is showing, as a **data** row and its column.
     pub(super) fn detail(&self) -> Option<(usize, usize)> {
         self.detail
@@ -275,19 +332,40 @@ impl ResultDelegate {
     /// until then.
     pub(super) fn adopt(
         &mut self,
-        rows: &ResultSet,
+        rows: &Arc<ResultSet>,
         explicit: Option<&BTreeMap<String, f64>>,
         layout: (f64, f64),
-    ) -> bool {
+    ) -> Adopted {
         let (available, scale) = layout;
-        let rows_changed = &self.rows != rows;
-        let layout_changed =
-            (self.available - available).abs() > 0.5 || (self.scale - scale).abs() > f64::EPSILON;
-        if !rows_changed && !layout_changed {
-            return false;
+        // The canvas hands over the same `Arc` on every frame, so the pointer answers "nothing
+        // has run" for free — which is the whole point of sharing the set rather than copying
+        // it. Only when the pointer moves has a query actually finished, and only then is a
+        // comparison by value worth its walk over every cell: a **live** query re-runs every ten
+        // seconds and usually gets identical rows back, and dropping the user's selection,
+        // search and open cell on each of those would make a live result unusable.
+        let same_set = Arc::ptr_eq(&self.rows, rows);
+        let rows_changed = !same_set && self.rows != *rows;
+        let widths_changed = (self.available - available).abs() > 0.5
+            || self.explicit.as_ref() != explicit
+            || rows_changed;
+        let scale_changed = (self.scale - scale).abs() > f64::EPSILON;
+
+        // Adopted whatever the values said, so the next frame gets its answer from the pointer
+        // again rather than re-walking a set it has already compared once.
+        if !same_set {
+            self.rows = Arc::clone(rows);
+        }
+        // The scale is only ever a multiplier on the way to pixels (see `pixels`), so adopting
+        // it can never invalidate the widths, which are world units.
+        self.scale = scale;
+        if !widths_changed {
+            return Adopted {
+                rows_changed: false,
+                widths_changed: false,
+                scale_changed,
+            };
         }
         if rows_changed {
-            self.rows = rows.clone();
             // A position only means something against the ordering it was captured in, so new
             // rows drop both the selection and any search.
             self.selection.clear();
@@ -296,9 +374,13 @@ impl ResultDelegate {
             self.editing = None;
         }
         self.available = available;
-        self.scale = scale;
+        self.explicit = explicit.cloned();
         self.widths = ColumnWidths::resolve(&self.rows, explicit, available);
-        true
+        Adopted {
+            rows_changed,
+            widths_changed: true,
+            scale_changed,
+        }
     }
 
     pub(super) fn scale(&self) -> f64 {
@@ -323,14 +405,24 @@ impl ResultDelegate {
 
 impl TableDelegate for ResultDelegate {
     fn columns_count(&self, _cx: &App) -> usize {
+        if self.pivoted {
+            // One field column, then one column per record the search left visible.
+            return 1 + self.matches.len();
+        }
         self.rows.column_count()
     }
 
     fn rows_count(&self, _cx: &App) -> usize {
+        if self.pivoted {
+            return self.rows.column_count();
+        }
         self.matches.len()
     }
 
     fn column(&self, col_ix: usize, _cx: &App) -> TableColumn {
+        if self.pivoted {
+            return self.pivot_column(col_ix);
+        }
         let Some(column) = self.rows.columns().get(col_ix) else {
             return TableColumn::new("", "");
         };
@@ -350,6 +442,9 @@ impl TableDelegate for ResultDelegate {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        if self.pivoted {
+            return Self::pivot_th(col_ix, cx);
+        }
         let Some(column) = self.rows.columns().get(col_ix) else {
             return div().into_any_element();
         };
@@ -404,6 +499,9 @@ impl TableDelegate for ResultDelegate {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        if self.pivoted {
+            return self.pivot_td(row_ix, col_ix, cx);
+        }
         let Some(row) = self.row_of(row_ix) else {
             return div().into_any_element();
         };
@@ -443,16 +541,11 @@ impl TableDelegate for ResultDelegate {
             .is_some_and(|role| !super::follow::targets(role).is_empty())
             && !value.is_null();
 
-        if self
-            .editing
-            .as_ref()
-            .is_some_and(|edit| edit.row == row && edit.column == col_ix)
-        {
-            let saving = self.editing.as_ref().is_some_and(|edit| edit.saving);
+        if let Some(open) = self.open_editor(row, col_ix) {
             return cell
                 .border_1()
                 .border_color(theme.accent)
-                .child(Input::new(&self.input).xsmall().disabled(saving))
+                .child(open)
                 .into_any_element();
         }
 
@@ -542,8 +635,123 @@ impl TableDelegate for ResultDelegate {
     /// The table's own CSV/copy path reads cells through this, so it has to agree with what the
     /// cell shows: `stringifyValue`, where NULL is the empty string.
     fn cell_text(&self, row_ix: usize, col_ix: usize, _cx: &App) -> String {
+        if self.pivoted {
+            return self.pivot_cell_text(row_ix, col_ix);
+        }
         self.row_of(row_ix)
             .and_then(|row| self.rows.cell(row, col_ix))
+            .map(peek_document::Cell::to_display_string)
+            .unwrap_or_default()
+    }
+}
+
+/// The record view: `ResultPivotView.tsx`.
+///
+/// Every index flips. A table row is one of the result's *columns*, and a table column is one
+/// *record* — the first holding the field names. The reference stacks each record as its own
+/// vertical table; `DataTable` has one grid and virtualises it, so the records sit side by side
+/// instead, which is the same information in the shape this table can draw.
+///
+/// It is a read view: the cell selection, column resizing and inline editing all address the
+/// untransposed grid, and no coordinate in them would survive the flip.
+mod pivot {
+    /// World units. The field column carries a name and a type, so it is the wider of the two.
+    pub(super) const FIELD_WIDTH: f64 = 190.0;
+    pub(super) const VALUE_WIDTH: f64 = 240.0;
+}
+
+impl ResultDelegate {
+    fn pivot_column(&self, col_ix: usize) -> TableColumn {
+        if col_ix == 0 {
+            return TableColumn::new("pivot-field", "Field")
+                .width(self.pixels(pivot::FIELD_WIDTH))
+                .movable(false)
+                // A width dragged here would be written back under a real column's name, which
+                // is a width the table view would then wear.
+                .resizable(false);
+        }
+        let name = gpui_kit::SharedString::from(format!("#{col_ix}"));
+        TableColumn::new(name.clone(), name)
+            .width(self.pixels(pivot::VALUE_WIDTH))
+            .movable(false)
+            .resizable(false)
+    }
+
+    fn pivot_th(col_ix: usize, cx: &App) -> gpui_kit::AnyElement {
+        let theme = cx.peek_theme();
+        let label = if col_ix == 0 {
+            "Field".to_string()
+        } else {
+            format!("#{col_ix}")
+        };
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .bg(theme.node_bg)
+            .text_color(theme.fg_subtle)
+            .child(label)
+            .into_any_element()
+    }
+
+    fn pivot_td(
+        &self,
+        row_ix: usize,
+        col_ix: usize,
+        cx: &mut Context<TableState<Self>>,
+    ) -> gpui_kit::AnyElement {
+        let Some(column) = self.rows.columns().get(row_ix) else {
+            return div().into_any_element();
+        };
+        let (name, sql_type) = (column.name.clone(), column.sql_type.clone());
+        let role = self.role(row_ix);
+        let field_bg = cx.peek_theme().node_bg_2;
+
+        if col_ix == 0 {
+            return div()
+                .size_full()
+                .bg(field_bg)
+                .child(super::cells::header(&name, &sql_type, role, cx))
+                .into_any_element();
+        }
+
+        let Some(row) = self.row_of(col_ix - 1) else {
+            return div().into_any_element();
+        };
+        let Some(value) = self.rows.cell(row, row_ix).cloned() else {
+            return div().into_any_element();
+        };
+        let matched = self.matches.cell(row, row_ix).is_some();
+        let match_bg = cx.peek_theme().node_bg_2;
+
+        div()
+            .id(("result-pivot-td", row_ix * 1000 + col_ix))
+            .size_full()
+            .when(matched, |cell| cell.bg(match_bg))
+            // A long value or a JSON object is a one-line summary here as it is in the table, so
+            // the pane is the only way to read it whole.
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |table, event: &MouseUpEvent, _, cx| {
+                    if event.click_count >= 2 {
+                        table.delegate_mut().set_detail(Some((row, row_ix)));
+                        cx.notify();
+                    }
+                }),
+            )
+            .child(super::cells::cell(&value, &sql_type, role, cx))
+            .into_any_element()
+    }
+
+    fn pivot_cell_text(&self, row_ix: usize, col_ix: usize) -> String {
+        let Some(column) = self.rows.columns().get(row_ix) else {
+            return String::new();
+        };
+        if col_ix == 0 {
+            return column.name.clone();
+        }
+        self.row_of(col_ix - 1)
+            .and_then(|row| self.rows.cell(row, row_ix))
             .map(peek_document::Cell::to_display_string)
             .unwrap_or_default()
     }

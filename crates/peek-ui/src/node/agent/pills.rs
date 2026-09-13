@@ -7,7 +7,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{Icon, StyledExt};
 use gpui_kit::prelude::*;
-use gpui_kit::{AnyElement, App, Entity, SharedString, div, px, rems};
+use gpui_kit::{AnyElement, App, Entity, SharedString, div, rems};
 use peek_document::AgentProvider;
 use peek_theme::ActivePeekTheme;
 
@@ -86,7 +86,7 @@ fn pill(id: &'static str, label: String, cx: &App) -> Button {
             )
             .child(
                 Icon::new(IconName::ChevronDown)
-                    .size(px(12.0))
+                    .size(rems(0.75))
                     .text_color(theme.fg_subtle),
             ),
     )

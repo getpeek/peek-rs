@@ -39,6 +39,10 @@ icon_assets!(
         Wrench,
         LoaderCircle,
         ShieldAlert,
+        // The connection picker.
+        Terminal,
+        Key,
+        X,
     ]
 );
 

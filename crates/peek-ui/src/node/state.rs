@@ -7,7 +7,7 @@
 //! Entries are pruned against the document, never against visibility: a node culled by the
 //! camera or scrolled off-screen must not lose what the user was typing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gpui_kit::{App, Entity, Window};
 use peek_canvas::Document;
@@ -72,6 +72,8 @@ pub(crate) struct NodeStates {
     /// The canvas' document, which never changes for the life of the view; injected once
     /// rather than threaded through `get` on every frame.
     document: Entity<Document>,
+    /// The document revision the entries were last pruned against.
+    pruned_at: Option<u64>,
 }
 
 impl NodeStates {
@@ -79,6 +81,7 @@ impl NodeStates {
         Self {
             entries: HashMap::new(),
             document,
+            pruned_at: None,
         }
     }
 
@@ -101,23 +104,32 @@ impl NodeStates {
         self.entries.get(&node.id)
     }
 
-    /// An already-created state, without creating one. Tests reach a node's retained state
-    /// through this; render paths use [`NodeStates::get`], which creates on first use.
-    #[cfg(test)]
+    /// An already-created state, without creating one.
+    ///
+    /// What a node reduced by the camera's level of detail asks for: it is not building an
+    /// editor this frame, so it must not bring one into being either, but a node that already
+    /// has one keeps it. Tests reach a node's retained state through this too.
     pub(crate) fn peek(&self, node: &NodeId) -> Option<&NodeState> {
         self.entries.get(node)
     }
 
+    /// Whether [`NodeStates::retain_live`] has anything to do at this document revision.
+    ///
+    /// Asked before the caller collects the live ids, because that collection is the expensive
+    /// half: every route that adds or removes a node bumps the revision, so an unchanged one
+    /// means the entries are already correct.
+    pub(crate) fn needs_pruning(&self, revision: u64) -> bool {
+        !self.entries.is_empty() && self.pruned_at != Some(revision)
+    }
+
     /// Drops state for nodes that are no longer in the document (deleted, undone, or on
     /// another page), letting each one release whatever it holds outside the map first.
-    pub(crate) fn retain_live(&mut self, nodes: &[Node], cx: &mut App) {
-        if self.entries.is_empty() {
-            return;
-        }
+    pub(crate) fn retain_live(&mut self, live: &HashSet<NodeId>, revision: u64, cx: &mut App) {
+        self.pruned_at = Some(revision);
         let dropped: Vec<NodeId> = self
             .entries
             .keys()
-            .filter(|id| !nodes.iter().any(|node| &node.id == *id))
+            .filter(|id| !live.contains(*id))
             .cloned()
             .collect();
         for id in dropped {

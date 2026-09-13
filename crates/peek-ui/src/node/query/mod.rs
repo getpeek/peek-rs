@@ -26,7 +26,7 @@ use peek_theme::ActivePeekTheme;
 
 use super::kind::NodeContext;
 use super::state::NodeState;
-use super::{BASE_REM, RESIZE_FOOTER_CLEARANCE};
+use super::{BASE_REM, RESIZE_FOOTER_CLEARANCE, TextInsetExt};
 
 /// `LIVE_POLL_MS` in `QueryNode.tsx`: the one interval the toggle offers.
 const LIVE_POLL_MS: u64 = 10_000;
@@ -67,6 +67,19 @@ impl QueryState {
     /// Hands focus to the SQL editor, which is what `Query::Focus` does from the canvas.
     /// `QueryEditor` stashes whatever held focus in its `InputEvent::Focus` arm, so escape
     /// gives it straight back.
+    /// Runs this node's query from outside the node. The palette dispatches through the canvas
+    /// focus handle, which sits *above* node elements, so `Query::Run`'s own handler never sees
+    /// it — see `canvas/dispatch`.
+    pub(crate) fn run(&self, cx: &mut App) {
+        self.editor.update(cx, QueryEditor::start_run);
+    }
+
+    /// Formats this node's query from outside the node, for the same reason as [`Self::run`].
+    pub(crate) fn format(&self, window: &mut Window, cx: &mut App) {
+        self.editor
+            .update(cx, |editor, cx| editor.apply_format(window, cx));
+    }
+
     pub(crate) fn focus_editor(&self, window: &mut Window, cx: &mut App) {
         self.editor
             .update(cx, |editor, cx| editor.focus_editor(window, cx));
@@ -497,6 +510,11 @@ impl QueryEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.apply_format(window, cx);
+        cx.stop_propagation();
+    }
+
+    fn apply_format(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.editor.read(cx).value().to_string();
         let formatted = peek_lsp::format(&current);
         if formatted != current {
@@ -508,7 +526,6 @@ impl QueryEditor {
             self.document
                 .update(cx, |document, _| document.checkpoint());
         }
-        cx.stop_propagation();
     }
 
     /// Escape: hand focus back to whatever had it, so a second escape reaches the canvas and
@@ -591,7 +608,7 @@ impl QueryEditor {
 }
 
 impl Render for QueryEditor {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id(SharedString::from(format!("{}-body", self.node)))
             .test_support()
@@ -637,7 +654,11 @@ impl Render for QueryEditor {
                             .bordered(false)
                             // Rems, not pixels: the canvas lays nodes out in a rem scope of
                             // `BASE_REM * zoom`, so this is the unit that tracks the camera.
-                            .text_size(rems(0.8125)),
+                            .text_size(rems(0.8125))
+                            // The inset between the editor's frame and its first glyph is the
+                            // one length it takes in screen pixels, so zoomed out to a third it
+                            // is three times the padding the rest of the node drew itself with.
+                            .scaled_code_inset(window),
                     ),
             )
             .child(self.footer(cx))

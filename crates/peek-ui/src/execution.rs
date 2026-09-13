@@ -106,7 +106,8 @@ pub(crate) fn run(
         Plan::Undefined(names) => {
             let message = Plan::undefined_message(&names);
             document.update(cx, |document, cx| {
-                document.place_query_error(node, &query, &message);
+                let (error, created) = document.place_query_error(node, &query, &message);
+                document.focus_created(created.then_some(error).into_iter().collect());
                 cx.notify();
             });
             return Run::Started;
@@ -122,17 +123,14 @@ pub(crate) fn run(
         let outcome = session.query(sql).await;
         cx.update(|cx| {
             document.update(cx, |document, cx| {
-                match outcome {
-                    Ok(Ok(rows)) => {
-                        document.place_result(&node, (&query, 0), rows);
-                    }
-                    Ok(Err(error)) => {
-                        document.place_query_error(&node, &query, &error.to_string());
-                    }
+                let (id, created) = match outcome {
+                    Ok(Ok(rows)) => document.place_result(&node, (&query, 0), rows),
+                    Ok(Err(error)) => document.place_query_error(&node, &query, &error.to_string()),
                     Err(_) => {
-                        document.place_query_error(&node, &query, "the database runtime stopped");
+                        document.place_query_error(&node, &query, "the database runtime stopped")
                     }
-                }
+                };
+                document.focus_created(created.then_some(id).into_iter().collect());
                 document.update_data::<QueryData>(&node, |data| data.is_running = Some(false));
                 cx.notify();
             });
@@ -173,26 +171,19 @@ pub(crate) fn run_queries(
             let outcome = session.query(query.clone()).await;
             let updated = cx.update(|cx| {
                 document.update(cx, |document, cx| {
-                    let id = match outcome {
-                        Ok(Ok(rows)) => {
-                            let (id, _) = document.place_result(&source, (&query, index), rows);
-                            Some(id)
-                        }
+                    let (id, created) = match outcome {
+                        Ok(Ok(rows)) => document.place_result(&source, (&query, index), rows),
                         Ok(Err(error)) => {
-                            document.place_query_error(&source, &query, &error.to_string());
-                            None
+                            document.place_query_error(&source, &query, &error.to_string())
                         }
-                        Err(_) => {
-                            document.place_query_error(
-                                &source,
-                                &query,
-                                "the database runtime stopped",
-                            );
-                            None
-                        }
+                        Err(_) => document.place_query_error(
+                            &source,
+                            &query,
+                            "the database runtime stopped",
+                        ),
                     };
                     cx.notify();
-                    id
+                    created.then_some(id)
                 })
             });
             if let Some(id) = updated {
@@ -200,14 +191,13 @@ pub(crate) fn run_queries(
             }
         }
 
-        // Selecting what arrived is how the user finds it: the new nodes may be off-screen, and
-        // `Zoom::FitSelection` then frames exactly them.
+        // `focusCreated` runs once the whole fan-out has landed, so the camera frames every
+        // node the run placed rather than flying to each in turn.
         if !placed.is_empty() {
             cx.update(|cx| {
                 document.update(cx, |document, cx| {
-                    if document.select_only(placed) {
-                        cx.notify();
-                    }
+                    document.focus_created(placed);
+                    cx.notify();
                 });
             });
         }

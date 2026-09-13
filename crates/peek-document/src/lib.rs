@@ -8,6 +8,7 @@
 mod agent;
 mod document;
 mod edge;
+pub mod export;
 pub mod geometry;
 mod ids;
 mod kinds;
@@ -22,6 +23,7 @@ mod storage;
 pub use agent::{AgentMessage, PlanEntry, ToolCall};
 pub use document::{CanvasDocument, DocVersion, DocumentError, Page, Viewport};
 pub use edge::Edge;
+pub use export::{filename as export_filename, to_csv, to_json};
 pub use ids::{EdgeId, NodeId, PageId, RegionId};
 pub use kinds::{FALLBACK_SIZE, NodeType};
 pub use migrate::normalize;

@@ -24,7 +24,7 @@ impl ResultTable {
         if !Database::is_connected(cx) {
             return None;
         }
-        self.editable_table(cx)?;
+        self.editable_table()?;
         let count = self
             .table
             .read(cx)
@@ -41,7 +41,7 @@ impl ResultTable {
         let Some(count) = self.deletable_rows(cx) else {
             return;
         };
-        let table = self.editable_table(cx).unwrap_or_default();
+        let table = self.editable_table().unwrap_or_default().to_string();
         let this = cx.entity().downgrade();
 
         window.open_dialog(cx, move |dialog, _, _| {
@@ -124,7 +124,7 @@ impl ResultTable {
 
     fn build_delete(&self, cx: &App) -> Result<String, NotEditable> {
         let table_name = self
-            .editable_table(cx)
+            .editable_table()
             .ok_or(NotEditable::NotASingleTableSelect)?;
         let engine = Database::engine(cx);
         let state = self.table.read(cx);
@@ -136,7 +136,7 @@ impl ResultTable {
             let schema = shared.read();
             schema
                 .primary_keys
-                .get(&table_name)
+                .get(table_name)
                 .cloned()
                 .unwrap_or_default()
         };
@@ -148,9 +148,9 @@ impl ResultTable {
             .selected_rows()
             .iter()
             .filter_map(|position| visible.get(*position).copied())
-            .map(|row| editable::key_bindings(rows, row, (&table_name, &keys), engine))
+            .map(|row| editable::key_bindings(rows, row, (table_name, &keys), engine))
             .collect::<Result<Vec<_>, _>>()?;
 
-        mutation::build_delete(engine, &table_name, &keys, &bindings)
+        mutation::build_delete(engine, table_name, &keys, &bindings)
     }
 }

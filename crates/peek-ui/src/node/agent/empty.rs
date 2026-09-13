@@ -3,7 +3,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{Icon, StyledExt};
 use gpui_kit::prelude::*;
-use gpui_kit::{AnyElement, App, div, px, rems};
+use gpui_kit::{AnyElement, App, div, rems};
 use peek_theme::ActivePeekTheme;
 
 /// A configured node with no conversation.
@@ -32,7 +32,7 @@ pub(super) fn unconfigured(cx: &App) -> AnyElement {
     centred()
         .child(
             Icon::new(IconName::TriangleAlert)
-                .size(px(22.0))
+                .size(rems(1.375))
                 .text_color(theme.red),
         )
         .child(
@@ -43,7 +43,7 @@ pub(super) fn unconfigured(cx: &App) -> AnyElement {
         )
         .child(
             div()
-                .max_w(px(280.0))
+                .max_w(rems(17.5))
                 .text_center()
                 .text_size(rems(0.7))
                 .text_color(theme.fg_subtle)

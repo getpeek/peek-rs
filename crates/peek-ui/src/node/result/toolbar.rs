@@ -9,7 +9,7 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::{Disableable, Sizable, StyledExt};
+use gpui_kit::component::{Disableable, Selectable, Sizable, StyledExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{AnyElement, App, Context, Entity, SharedString, div, rems};
 use peek_theme::ActivePeekTheme;
@@ -87,9 +87,10 @@ impl ResultTable {
             .collect()
     }
 
-    /// The right-hand buttons. Only search works today; the rest name what they wait for.
+    /// The right-hand buttons. Search and pivot work; the rest name what they wait for.
     fn actions(&self, cx: &mut Context<Self>) -> AnyElement {
         let has_rows = self.table.read(cx).delegate().result_rows().row_count() > 0;
+        let pivoted = self.table.read(cx).delegate().is_pivoted();
         div()
             .h_flex()
             .items_center()
@@ -98,7 +99,7 @@ impl ResultTable {
             .children(self.deletable_rows(cx).map(|count| {
                 // Only when rows are selected in a result that can be written, so the one
                 // irreversible action in the table never sits there inviting a stray click.
-                Button::new(SharedString::from(format!("{}-delete", self.node)))
+                Button::new(self.ids.delete.clone())
                     .danger()
                     .xsmall()
                     .label(if count == 1 {
@@ -110,11 +111,13 @@ impl ResultTable {
                     .on_click(cx.listener(|this, _, window, cx| this.confirm_delete(window, cx)))
             }))
             .child(
-                Button::new(SharedString::from(format!("{}-search", self.node)))
+                Button::new(self.ids.search.clone())
                     .ghost()
                     .xsmall()
                     .label("Find")
-                    .disabled(!has_rows)
+                    // The record view has no rows to filter, so the find bar has nothing to do
+                    // there — the same exclusion the reference draws.
+                    .disabled(!has_rows || pivoted)
                     .tooltip("Search this result")
                     .on_click(cx.listener(|this, _, window, cx| this.open_search(window, cx))),
             )
@@ -126,10 +129,20 @@ impl ResultTable {
                 "Export",
                 "Export arrives with the export milestone",
             ))
-            .child(waiting(
-                "Pivot",
-                "The record view arrives with the pivot milestone",
-            ))
+            .child(
+                Button::new(self.ids.pivot.clone())
+                    .ghost()
+                    .xsmall()
+                    .selected(pivoted)
+                    .label("Pivot")
+                    .disabled(!has_rows)
+                    .tooltip(if pivoted {
+                        "Show as a table"
+                    } else {
+                        "Read the rows as records"
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| this.dispatch_pivot(window, cx))),
+            )
             .into_any_element()
     }
 
@@ -156,7 +169,7 @@ impl ResultTable {
                 row.child(div().flex_none().child(plural(shown, "match", "matches")))
             })
             .child(
-                Button::new(SharedString::from(format!("{}-search-close", self.node)))
+                Button::new(self.ids.search_close.clone())
                     .ghost()
                     .xsmall()
                     .label("Close")

@@ -14,7 +14,7 @@
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{Sizable, StyledExt};
 use gpui_kit::prelude::*;
-use gpui_kit::{AnyElement, App, Context, SharedString, div, rems};
+use gpui_kit::{AnyElement, App, Context, div, rems};
 use peek_document::Cell;
 use peek_theme::ActivePeekTheme;
 
@@ -64,7 +64,7 @@ impl ResultTable {
                         .text_color(theme.fg_subtle)
                         .child(name)
                         .child(
-                            Button::new(SharedString::from(format!("{}-detail-close", self.node)))
+                            Button::new(self.ids.detail_close.clone())
                                 .ghost()
                                 .xsmall()
                                 .label("Close")

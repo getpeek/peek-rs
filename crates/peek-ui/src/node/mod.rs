@@ -18,7 +18,7 @@ pub(crate) mod variable;
 use gpui_kit::TestSupportExt;
 use gpui_kit::component::StyledExt;
 use gpui_kit::prelude::*;
-use gpui_kit::{AnyElement, App, Div, Hsla, SharedString, Window, div, rems};
+use gpui_kit::{AnyElement, App, Div, Hsla, Pixels, Rems, SharedString, Window, div, rems};
 use peek_document::{Node, NodeType};
 use peek_theme::{ActivePeekTheme, PeekTheme, ResolvedFrame, TypeIndicator};
 
@@ -31,6 +31,56 @@ const BASE_REM: f32 = 16.0;
 /// when it is placed. Zoomed further out the band covers more world units than this and eats
 /// into a footer; precise clicking at that zoom is not the case worth optimising for.
 const RESIZE_FOOTER_CLEARANCE: f32 = 12.0;
+
+/// A themed pixel length as rems, so it tracks the canvas' rem scope instead of staying the
+/// same number of screen pixels as the camera zooms out.
+pub(crate) fn scaled(length: Pixels) -> Rems {
+    rems(f32::from(length) / BASE_REM)
+}
+
+/// A length designed in pixels, as the camera should draw it.
+///
+/// A few gpui-component APIs take screen pixels and offer no rem-relative form — a markdown
+/// heading's size, a multi-line input's text inset — so inside the canvas they have to be scaled
+/// by hand. Reads the rem scope the node is being laid out in, which is every `render` below
+/// [`crate::canvas`]; [`kind::NodeContext::zoom`] is the answer outside it.
+pub(crate) fn scaled_px(design: f32, window: &Window) -> Pixels {
+    gpui_kit::px(design * f32::from(window.rem_size()) / BASE_REM)
+}
+
+/// Screen pixels a multi-line gpui-component input keeps between its frame and its first glyph:
+/// `Size::Medium`'s `input_px` and `input_py`. The editor applies them inside itself, where no
+/// style refinement reaches them.
+const INPUT_INSET: (f32, f32) = (10.0, 8.0);
+
+/// More of the same in front of a code editor's first column: the gutter it lays out for line
+/// numbers, which stays one `LINE_NUMBER_RIGHT_MARGIN` wide even when they are switched off.
+const CODE_GUTTER: f32 = 10.0;
+
+pub(crate) trait TextInsetExt: Styled + Sized {
+    /// Turns a multi-line input's fixed text inset into one the camera scales.
+    fn scaled_text_inset(self, window: &Window) -> Self {
+        let (x, y) = INPUT_INSET;
+        self.pulled_back(x, y, window)
+    }
+
+    /// The same for a code editor, which insets its text a second time for the gutter.
+    fn scaled_code_inset(self, window: &Window) -> Self {
+        let (x, y) = INPUT_INSET;
+        self.pulled_back(x + CODE_GUTTER, y, window)
+    }
+
+    /// Pulls the frame out by the part of a fixed inset the camera should have taken away, which
+    /// leaves the text `inset * zoom` from the edge and the frame no taller than the text needs.
+    /// The overhang is real, so an input styled this way must paint no background or border of
+    /// its own — draw those on the element around it instead.
+    fn pulled_back(self, x: f32, y: f32, window: &Window) -> Self {
+        self.mx(scaled_px(x, window) - gpui_kit::px(x))
+            .my(scaled_px(y, window) - gpui_kit::px(y))
+    }
+}
+
+impl<T: Styled> TextInsetExt for T {}
 
 /// The chrome around a node body. Kinds contribute a `body` element and optional header
 /// controls; everything else — frame, header, brackets — is identical for all of them.
@@ -109,7 +159,7 @@ impl RenderOnce for NodeShell {
         let theme = cx.peek_theme();
         let accent = theme.node_type(self.node_type);
         let label = self.node_type.map_or("NODE", NodeType::label);
-        let radius = rems(f32::from(theme.radius_node) / BASE_REM);
+        let radius = scaled(theme.radius_node);
         let border = if self.selected {
             theme.node_border_strong
         } else {

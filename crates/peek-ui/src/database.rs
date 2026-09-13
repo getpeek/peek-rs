@@ -189,7 +189,7 @@ async fn load_schema(session: &Arc<Session>, cx: &mut AsyncApp) {
     });
 }
 
-fn tunnel_config(config: &peek_config::SshTunnelConfig) -> TunnelConfig {
+pub(crate) fn tunnel_config(config: &peek_config::SshTunnelConfig) -> TunnelConfig {
     TunnelConfig {
         ssh_host: config.ssh_host.clone(),
         ssh_port: config.ssh_port,
