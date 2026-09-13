@@ -53,6 +53,17 @@ impl Engine {
         }
     }
 
+    /// The engine as `get_connection_info` reports it to an agent. A frozen wire value — the
+    /// same string the reference's `engineFromUrl` returns — not the prose name.
+    #[must_use]
+    pub const fn tag(self) -> &'static str {
+        match self {
+            Self::Postgres => "postgresql",
+            Self::MySql => "mysql",
+            Self::Unknown => "unknown",
+        }
+    }
+
     /// How the dialect is named in prose, for error messages and AI prompts.
     #[must_use]
     pub fn dialect_name(self) -> &'static str {

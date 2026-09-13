@@ -6,6 +6,7 @@ pub struct Scope {
     pub selected_edges: usize,
     pub selected_queries: usize,
     pub selected_results: usize,
+    pub selected_agents: usize,
     pub pages: usize,
     pub history: HistoryScope,
     pub camera_locked: bool,

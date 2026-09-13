@@ -108,6 +108,12 @@ impl History {
         }
     }
 
+    /// Throws the open transaction away instead of sealing it, for an edit that is being
+    /// rolled back by hand: a cancelled placement drag.
+    pub(crate) fn discard(&mut self) {
+        self.pending = None;
+    }
+
     /// `page` must be the page as it is *now*, so a transaction that changed nothing is
     /// dropped instead of leaving a dead undo step.
     fn seal(&mut self, page: &Page) {

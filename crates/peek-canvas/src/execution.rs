@@ -94,6 +94,23 @@ impl Document {
         merged
     }
 
+    /// The query node a result came from, found through the edge that placed it.
+    ///
+    /// Re-running that node is how a result refreshes after a row is edited or deleted: it
+    /// re-resolves the variables, re-places the rows and clears any error, all through the one
+    /// path — the reference does the same rather than re-issuing the SQL by hand.
+    #[must_use]
+    pub fn source_query_of(&self, result: &NodeId) -> Option<NodeId> {
+        self.edges()
+            .iter()
+            .filter(|edge| &edge.target == result)
+            .map(|edge| edge.source.clone())
+            .find(|source| {
+                self.node(source)
+                    .is_some_and(|node| node.node_type() == Some(NodeType::Query))
+            })
+    }
+
     /// Places or refreshes the result of running `query` on `source`, and stores its rows.
     ///
     /// `index` distinguishes the results of a multi-statement run; the node id is derived from
@@ -114,7 +131,7 @@ impl Document {
         let size = result_size(&rows);
         let existed = self.node(&id).is_some();
         let placed = id.clone();
-        self.transaction(EditKind::Structure, |document| {
+        self.transaction_of(EditKind::Structure, |document| {
             document.place_result_inner(source, (query, index), (placed, size, existed));
         });
         self.set_result(id.clone(), rows);
@@ -155,7 +172,7 @@ impl Document {
     pub fn place_query_error(&mut self, source: &NodeId, query: &str, message: &str) -> NodeId {
         let id = NodeId::error_of(source);
         let placed = id.clone();
-        self.transaction(EditKind::Structure, |document| {
+        self.transaction_of(EditKind::Structure, |document| {
             document.place_query_error_inner(source, query, (placed, message));
         });
         id

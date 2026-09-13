@@ -97,7 +97,7 @@ struct Tool {
     arms: Option<NodeType>,
     waiting_for: Option<&'static str>,
     build: fn() -> Box<dyn Action>,
-    /// `.sep` follows this tool: the reference groups select, then the place tools, then activity.
+    /// `.sep` follows this tool: select is its own group, then the place tools.
     separator_after: bool,
 }
 
@@ -155,15 +155,6 @@ const TOOLS: &[Tool] = &[
         arms: Some(NodeType::Draw),
         waiting_for: None,
         build: || Box::new(actions::tool::Draw),
-        separator_after: true,
-    },
-    Tool {
-        id: "View::ShowRunningQueries",
-        label: "Activity",
-        icon: IconName::Activity,
-        arms: Some(NodeType::Activity),
-        waiting_for: Some("a database connection"),
-        build: || Box::new(actions::view::ShowRunningQueries),
         separator_after: false,
     },
 ];

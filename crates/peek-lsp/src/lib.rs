@@ -19,10 +19,12 @@ mod sql_text;
 pub use lsp_types;
 
 pub use backend::Backend;
+pub use completion::anchor_to_typed_prefix;
 pub use highlights::sql_highlights;
 pub use parser::sql_language;
-pub use query_info::{QueryInfo, analyze as analyze_query};
+pub use query_info::{QueryInfo, StatementType, TableRef, analyze as analyze_query};
 pub use schema::{SchemaIndex, SharedSchema, set_schema, shared_schema};
 pub use sql_text::{
-    Substitution, VariableSite, format, is_unbounded_write, substitute, variable_sites,
+    Substitution, VariableSite, format, is_unbounded_write, substitute, variable_prefix_at,
+    variable_sites,
 };

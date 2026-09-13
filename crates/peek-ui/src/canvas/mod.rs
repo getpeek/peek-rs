@@ -8,6 +8,7 @@ mod grid;
 mod hud;
 mod jump;
 mod toolbar;
+mod tools;
 
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
@@ -70,6 +71,9 @@ pub(crate) struct CanvasView {
     chrome_visible: bool,
     /// Jump mode: the labelled targets and what has been typed, or `None` when it is off.
     jump: Option<JumpMode>,
+    /// The node a running placement drag created, which the rest of the drag resizes. The
+    /// reducer tracks the gesture; the id lives here because the document mints it.
+    placement: Option<NodeId>,
     /// Drops jump mode and the space-pan when focus leaves. Both are latched state that only
     /// a key *release* would otherwise clear, and that release never arrives once a dialog or
     /// another view has taken focus.
@@ -116,6 +120,7 @@ impl CanvasView {
             hovered: Hover::default(),
             chrome_visible: true,
             jump: None,
+            placement: None,
             _focus_out: focus_out,
         }
     }
@@ -152,6 +157,19 @@ impl CanvasView {
     ) -> Option<gpui_kit::Entity<node::result::ResultTable>> {
         match self.node_states.peek(node)? {
             node::state::NodeState::Result(state) => Some(state.inner()),
+            _ => None,
+        }
+    }
+
+    /// The view behind an agent node, for tests.
+    #[cfg(test)]
+    pub(crate) fn agent_view(
+        &self,
+        node: &peek_document::NodeId,
+        _cx: &App,
+    ) -> Option<gpui_kit::Entity<node::agent::AgentView>> {
+        match self.node_states.peek(node)? {
+            node::state::NodeState::Agent(state) => Some(state.view().clone()),
             _ => None,
         }
     }
@@ -525,8 +543,18 @@ impl CanvasView {
             return;
         }
         let node = node.clone();
-        if let Some(node::state::NodeState::Query(state)) = self.node_states.get(&node, window, cx)
-        {
+        self.focus_query_editor(&node, window, cx);
+    }
+
+    /// Hands focus to a query node's SQL editor, creating its retained state if the node has
+    /// not rendered yet — which is the case for a query the pointer just placed.
+    fn focus_query_editor(
+        &mut self,
+        node: &peek_document::Node,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(node::state::NodeState::Query(state)) = self.node_states.get(node, window, cx) {
             state.focus_editor(window, cx);
         }
     }
@@ -553,6 +581,7 @@ impl CanvasView {
             return;
         }
         self.interaction = Interaction::Idle;
+        self.cancel_placement(cx);
         self.document.update(cx, |document, cx| {
             if document.deselect_all() {
                 cx.notify();
@@ -605,7 +634,7 @@ impl CanvasView {
     fn new_page(&mut self, _: &actions::page::New, _: &mut Window, cx: &mut Context<Self>) {
         self.commit_viewport(cx);
         self.document.update(cx, |document, cx| {
-            document.add_page(None);
+            document.add_page(None, None);
             cx.notify();
         });
         self.adopt_active_page(cx);
@@ -626,6 +655,15 @@ impl CanvasView {
         self.arm_tool(NodeType::Query, window, cx);
     }
 
+    fn place_agent(
+        &mut self,
+        _: &actions::tool::Agent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.arm_tool(NodeType::Agent, window, cx);
+    }
+
     fn place_variable(
         &mut self,
         _: &actions::tool::Variable,
@@ -642,6 +680,42 @@ impl CanvasView {
         cx: &mut Context<Self>,
     ) {
         self.arm_tool(NodeType::Draw, window, cx);
+    }
+
+    /// Forks the selected agent conversation into a sibling node and flies to it.
+    ///
+    /// Handled here rather than on the node because it needs the camera, and because the header
+    /// button, the palette and the keyboard all have to run this one path.
+    fn fork_agent(
+        &mut self,
+        _: &actions::agent::Fork,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source) = self.document.read(cx).selected().iter().next().cloned() else {
+            return;
+        };
+        let forked = self.document.update(cx, |document, cx| {
+            let forked = document.fork_agent(&source);
+            if forked.is_some() {
+                document.checkpoint();
+                cx.notify();
+            }
+            forked
+        });
+        let Some(forked) = forked else {
+            return;
+        };
+        let Some(bounds) = self
+            .document
+            .read(cx)
+            .node(&forked)
+            .map(peek_document::Node::bounds)
+        else {
+            return;
+        };
+        let target = self.centred_on(bounds.center(), self.camera.zoom, window);
+        self.fly_to(target, durations::FIT_SELECTED, window, cx);
     }
 
     /// Arms place mode: the next click places the node, a drag sizes it, escape cancels.
@@ -913,7 +987,17 @@ impl CanvasView {
                     cx.notify();
                 });
             }
-            Effect::PlaceNode { node_type, world } => self.place_node(node_type, world, window, cx),
+            Effect::PlaceNode { node_type, world } => self.place_node(node_type, world, cx),
+            Effect::ResizePlacement { world } => {
+                let Some(id) = self.placement.clone() else {
+                    return;
+                };
+                self.document.update(cx, |document, cx| {
+                    document.resize_placement(&id, world);
+                    cx.notify();
+                });
+            }
+            Effect::CommitPlacement => self.commit_placement(window, cx),
             // Not `place_node`: `useDrawTool` neither selects the stroke nor flies the camera to
             // it, and the tool is left armed for the next one.
             Effect::PlaceDrawing { points } => {
@@ -1120,26 +1204,49 @@ impl CanvasView {
         })
     }
 
-    fn place_node(
-        &mut self,
-        node_type: NodeType,
-        world: Rect,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Creates the node a placement is sizing. The undo step it opens is left open until
+    /// [`CanvasView::commit_placement`] seals it, so the whole drag is one entry.
+    fn place_node(&mut self, node_type: NodeType, world: Rect, cx: &mut Context<Self>) {
         let id = self.document.update(cx, |document, cx| {
             let id = document.create_node(node_type, world);
-            document.checkpoint();
             document.select_only([id.clone()]);
             cx.notify();
             id
         });
-        self.interaction = Interaction::Idle;
-        log::debug!("peek: placed {node_type:?} as {id}");
-        // `usePlaceTool` frames the new node at 100 %, so it is immediately editable.
+        log::debug!("peek: placing {node_type:?} as {id}");
+        self.placement = Some(id);
+    }
+
+    /// Ends a placement: one undo step, the node framed at 100 % as `usePlaceTool` does, and a
+    /// query handed straight to its editor so it is typable without a further click.
+    fn commit_placement(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.placement.take() else {
+            return;
+        };
+        let Some(node) = self.document.update(cx, |document, _| {
+            document.checkpoint();
+            document.node(&id).cloned()
+        }) else {
+            return;
+        };
         let (pane, top) = self.framing_pane(window);
-        let target = Self::below_chrome(Camera::centered_on(world.center(), 1.0, pane), top);
+        let target =
+            Self::below_chrome(Camera::centered_on(node.bounds().center(), 1.0, pane), top);
         self.fly_to(target, durations::ZOOM_TO_NODE, window, cx);
+        if matches!(node.kind, NodeKind::Query(_)) {
+            self.focus_query_editor(&node, window, cx);
+        }
+    }
+
+    /// Drops the node of a placement the user escaped out of, leaving nothing to undo.
+    fn cancel_placement(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.placement.take() else {
+            return;
+        };
+        self.document.update(cx, |document, cx| {
+            document.cancel_placement(&id);
+            cx.notify();
+        });
     }
 
     /// Builds one node's element tree: the shared shell around a per-kind body, or a bare
@@ -1171,7 +1278,7 @@ impl CanvasView {
                 .into_any_element();
         }
         let extras = node::kind::header_extras(node, context, window, cx);
-        NodeShell::new(node, selected, body)
+        NodeShell::new(node, selected, body, cx)
             .header_extras(extras)
             .into_any_element()
     }
@@ -1310,10 +1417,7 @@ impl Render for CanvasView {
         let overlay = Overlay {
             edges: self.edge_items(visible, cx),
             selected_rects,
-            marquee: self
-                .interaction
-                .marquee_screen_rect()
-                .or_else(|| self.interaction.placement_screen_rect()),
+            marquee: self.interaction.marquee_screen_rect(),
             stroke: self.live_stroke(cx),
             background: theme.canvas_base,
             gradient: theme.canvas_gradient,
@@ -1354,6 +1458,8 @@ impl Render for CanvasView {
             .on_action(cx.listener(Self::new_page))
             .on_action(cx.listener(Self::close_page))
             .on_action(cx.listener(Self::place_query))
+            .on_action(cx.listener(Self::place_agent))
+            .on_action(cx.listener(Self::fork_agent))
             .on_action(cx.listener(Self::place_text))
             .on_action(cx.listener(Self::place_variable))
             .on_action(cx.listener(Self::place_drawing))

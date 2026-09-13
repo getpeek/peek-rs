@@ -1,11 +1,8 @@
-//! What makes a variable name usable, from `~/labs/peek/src/canvas/variables.ts`.
-//!
-//! `VARIABLE_NAME_RE` is `/^[A-Za-z_][A-Za-z0-9_]*$/u` and `scanVariableSites` only ever
-//! matches that shape, so a name outside it can never be substituted into a query however
-//! valid it looks; the grammar is six characters wide, which is cheaper to spell out than to
-//! pull a regex engine into the UI crate for.
+//! Why a variable row's name would not reach a query. The grammar itself lives in
+//! `peek_document::is_variable_name`, beside the `VariableRow` it constrains, because the
+//! canvas tools validate against it too.
 
-use peek_document::VariableRow;
+use peek_document::{VariableRow, is_variable_name};
 
 /// Why a row's name would not reach a query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,24 +28,13 @@ pub(super) fn problem(name: &str, rows: &[VariableRow]) -> Option<NameProblem> {
     if name.is_empty() {
         return None;
     }
-    if !is_valid(name) {
+    if !is_variable_name(name) {
         return Some(NameProblem::Malformed);
     }
     if rows.iter().filter(|row| row.name == name).count() > 1 {
         return Some(NameProblem::Duplicate);
     }
     None
-}
-
-fn is_valid(name: &str) -> bool {
-    let mut characters = name.chars();
-    let Some(first) = characters.next() else {
-        return false;
-    };
-    if !first.is_ascii_alphabetic() && first != '_' {
-        return false;
-    }
-    characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
 #[cfg(test)]

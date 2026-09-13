@@ -10,7 +10,8 @@ use peek_document::{Node, NodeKind};
 
 use super::state::NodeState;
 use super::{
-    barchart, draw, placeholder, query, query_error, result, table_definition, text, variable,
+    agent, barchart, draw, placeholder, query, query_error, result, table_definition, text,
+    variable,
 };
 
 /// What a body needs beyond its own data: somewhere to write back, the kind's retained state
@@ -46,8 +47,12 @@ impl std::fmt::Debug for NodeContext<'_> {
 }
 
 /// The node's header title.
-pub(crate) fn title(node: &Node) -> String {
+///
+/// Takes the app because the agent node's title is which backend it talks to, and that comes
+/// from `settings.json` rather than from the node.
+pub(crate) fn title(node: &Node, cx: &App) -> String {
     match &node.kind {
+        NodeKind::Agent(data) => agent::title(data, cx),
         NodeKind::Query(data) => query::title(data),
         NodeKind::Text(data) => text::title(data),
         NodeKind::Variable(data) => variable::title(data),
@@ -68,6 +73,7 @@ pub(crate) fn body(
     cx: &mut App,
 ) -> AnyElement {
     match &node.kind {
+        NodeKind::Agent(data) => agent::body(&node.id, data, context, window, cx),
         NodeKind::Query(data) => query::body(&node.id, data, context, window, cx),
         NodeKind::Text(data) => text::body(&node.id, data, context, window, cx),
         NodeKind::Variable(data) => variable::body(&node.id, data, context, window, cx),
@@ -89,6 +95,7 @@ pub(crate) fn header_extras(
     cx: &mut App,
 ) -> Option<AnyElement> {
     match &node.kind {
+        NodeKind::Agent(data) => agent::header_extras(&node.id, data, context, window, cx),
         NodeKind::Query(data) => Some(query::header_extras(&node.id, data, context, window, cx)),
         NodeKind::Barchart(data) => barchart::header_extras(&node.id, data, context, window, cx),
         NodeKind::Variable(data) => variable::header_extras(&node.id, data, context, window, cx),

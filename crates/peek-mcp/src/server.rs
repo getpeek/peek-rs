@@ -14,14 +14,17 @@ use super::{connection, nodes, pages, regions, schema, view};
 /// anything that can route to the port can drive the canvas. The only client that needs
 /// it is the ACP agent Peek itself spawns, which is local — see `docs/decisions.md`.
 ///
+/// The listener is bound by the caller, so a port collision is reported before the server is
+/// handed out rather than as a mysteriously failing first tool call.
+///
 /// # Errors
 ///
-/// Returns an error if the port cannot be bound (e.g. already in use) or the
-/// HTTP server stops with an error.
-pub async fn serve(port: u16, bridge: SharedBridge) -> anyhow::Result<()> {
+/// Returns an error if the listener cannot be adopted or the HTTP server stops with an error.
+pub async fn serve(listener: std::net::TcpListener, bridge: SharedBridge) -> anyhow::Result<()> {
     super::bridge::init(bridge);
 
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+    listener.set_nonblocking(true)?;
+    let listener = tokio::net::TcpListener::from_std(listener)?;
     axum::serve(listener, app()).await?;
 
     Ok(())

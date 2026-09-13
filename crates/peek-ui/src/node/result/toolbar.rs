@@ -95,6 +95,20 @@ impl ResultTable {
             .items_center()
             .gap(rems(0.125))
             .flex_none()
+            .children(self.deletable_rows(cx).map(|count| {
+                // Only when rows are selected in a result that can be written, so the one
+                // irreversible action in the table never sits there inviting a stray click.
+                Button::new(SharedString::from(format!("{}-delete", self.node)))
+                    .danger()
+                    .xsmall()
+                    .label(if count == 1 {
+                        "Delete row".to_string()
+                    } else {
+                        format!("Delete {count} rows")
+                    })
+                    .tooltip("Delete the selected rows — this cannot be undone")
+                    .on_click(cx.listener(|this, _, window, cx| this.confirm_delete(window, cx)))
+            }))
             .child(
                 Button::new(SharedString::from(format!("{}-search", self.node)))
                     .ghost()

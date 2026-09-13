@@ -14,15 +14,15 @@ current when a milestone or a known gap changes.
 `~/labs/peek` is the specification and is **read-only**. When porting a feature, read the
 TypeScript source first and reproduce its behaviour, constants and on-disk formats:
 
-| Concern | Where to look |
-|---|---|
-| Canvas, document model, camera verbs | `~/labs/peek/src/canvas/` (`types.ts`, `defaults.ts`, `ids.ts`, `hooks/useCanvas.ts`) |
-| Node kinds | `~/labs/peek/src/canvas/nodes/<Kind>/` |
-| Command palette commands | `~/labs/peek/src/command-palette/commands/` |
-| Keyboard shortcuts and keymap semantics | `~/labs/peek/docs/keymap.md`, `src-tauri/src/config/keymap.rs` |
-| Themes (`--pk-*` tokens) | `~/labs/peek/src/canvas/nodes/theme/*.css`, `node.css` |
-| Rust host already ported / to port | `~/labs/peek/src-tauri/src/`, `src-tauri/crates/{lsp,mcp,acp}` |
-| User data | `~/peek/settings.json`, `~/peek/workspaces/<workspace>/<connection>.json` |
+| Concern                                 | Where to look                                                                         |
+| --------------------------------------- | ------------------------------------------------------------------------------------- |
+| Canvas, document model, camera verbs    | `~/labs/peek/src/canvas/` (`types.ts`, `defaults.ts`, `ids.ts`, `hooks/useCanvas.ts`) |
+| Node kinds                              | `~/labs/peek/src/canvas/nodes/<Kind>/`                                                |
+| Command palette commands                | `~/labs/peek/src/command-palette/commands/`                                           |
+| Keyboard shortcuts and keymap semantics | `~/labs/peek/docs/keymap.md`, `src-tauri/src/config/keymap.rs`                        |
+| Themes (`--pk-*` tokens)                | `~/labs/peek/src/canvas/nodes/theme/*.css`, `node.css`                                |
+| Rust host already ported / to port      | `~/labs/peek/src-tauri/src/`, `src-tauri/crates/{lsp,mcp,acp}`                        |
+| User data                               | `~/peek/settings.json`, `~/peek/workspaces/<workspace>/<connection>.json`             |
 
 **On-disk formats are frozen.** `settings.json` and workspace documents must stay readable by
 both apps. Never write a document shape the TypeScript app cannot open. Ephemeral React Flow
@@ -41,23 +41,25 @@ them (`crates/lsp`, `crates/mcp`, `crates/acp`, `database/`, `ssh_tunnel.rs`, `i
 # Milestones
 
 - [x] M1 Load a real document; placeholder node shells; pan / zoom / camera flights; keymap + palette (headless tests green; manual feel-test pending)
-- [ ] M2 Node shell: header, selection (click / shift / marquee), drag, entry animation
+- [x] M2 Node shell: header, selection (click / shift / marquee), drag, entry animation
 - [x] M3 Themes: the six Peek themes as `PeekTheme` + gpui-component `ThemeConfig`, picker with live preview (syntax colours, swatches and dock icon trail)
 - [x] M4 First real nodes (Text, Variable, Query + peek-lsp), document mutations, undo, autosave → writes enabled
       (Query runs nothing until M5: no connection, so `Query::Run` does not exist yet)
-- [ ] M5 peek-db: connections, SSH tunnels, results, schema, import
+- [x] M5 peek-db: connections, SSH tunnels, results, schema, import
       (done: drivers, tunnels + host-key verification, schema, the results sidecar and its autosave,
       the mutation SQL builders, the tokio↔gpui session bridge, `Query::Run` with result placement,
       live polling and the unbounded-write gate, and the Result node's table with rectangular cell
       and row selection, TSV copy, persisted column widths, the toolbar with selection statistics,
-      in-result find, PK/FK classification and the cell value pane. Left: import, and the Result
-      node's follow-references / editing / delete / export / pivot — see docs/status.md)
-- [ ] M6 peek-mcp bridge, peek-acp agent node
+      in-result find, PK/FK classification, the cell value pane, inline editing and row deletion.
+      Left: import, and the Result node's export / context menus / pivot — see docs/status.md)
+- [x] M6 peek-mcp bridge, peek-acp agent node, local Ollama backend
+      (the 21 canvas tools live in `peek-canvas::tools` and serve both the MCP bridge and the
+      agent node's own loop; regions gained a mutation API but nothing renders them yet)
 - [ ] M7 peek-multiplayer
 
 # Crate map
 
-Split by *compile time*: the crate you edit most (UI) is a leaf, and everything testable without
+Split by _compile time_: the crate you edit most (UI) is a leaf, and everything testable without
 a window lives below gpui.
 
 ```
@@ -74,7 +76,10 @@ peek-lsp        tree-sitter SQL: completions, diagnostics, formatting, the highl
 peek-db         sqlx drivers, SSH tunnels, schema introspection, the UPDATE/DELETE builders and
                 the tokio runtime every database call runs on. Depends on peek-document for
                 `ResultSet`. No gpui.
-peek-mcp / peek-acp / peek-multiplayer   backends (later); must never import gpui.
+peek-acp / peek-mcp / peek-ollama        agent backends: an ACP subprocess, the MCP server the
+                agent drives the canvas through, and a local Ollama client. Each owns its own tokio
+                runtime and hands back plain futures. No gpui.
+peek-multiplayer backend (later); must never import gpui.
 ```
 
 Rule: **if it can be written without gpui, it does not go in `peek-ui`.** Camera maths, selection
@@ -108,7 +113,7 @@ rules, document mutations and keymap parsing are unit-tested with plain `cargo t
   Keyboard, palette, menus and buttons all dispatch that action. MCP, multiplayer, undo and tests
   use the `peek_canvas::Document` mutation API directly. Availability comes from `peek_canvas::Scope`.
 - Key contexts nest `Workspace > Canvas > <Kind>Node > Input`. Canvas bindings use
-  `"Canvas && !Input && !NumberInput"`. `"QueryNode"` is for commands that must fire *while*
+  `"Canvas && !Input && !NumberInput"`. `"QueryNode"` is for commands that must fire _while_
   the SQL editor holds focus, so they carry a modifier; `Query::Format` is the only one until
   `Query::Run` joins it in M5.
 - Action names generated by `actions!(Group, [Variant])` are `"Group::Variant"` — identical to the

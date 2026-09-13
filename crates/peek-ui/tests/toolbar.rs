@@ -87,17 +87,11 @@ fn the_select_tool_disarms_a_place_tool(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_tool_with_no_registered_command_is_present_but_inert(cx: &mut TestAppContext) {
+fn the_agent_tool_arms_place_mode(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);
     let before = node_count(cx, &workspace);
 
-    // `Tool::Agent` has no `COMMANDS` entry until peek-acp lands, so the button renders
-    // disabled rather than arming a tool whose node cannot do anything yet.
     cx.update_window(handle.into(), |_, window, cx| {
-        assert!(
-            window.try_find("Tool::Agent").is_some(),
-            "the slot is shown"
-        );
         window.click("Tool::Agent", cx);
         window.render_frame(cx);
         let at = gpui_kit::point(px(600.0), px(500.0));
@@ -105,11 +99,29 @@ fn a_tool_with_no_registered_command_is_present_but_inert(cx: &mut TestAppContex
     })
     .unwrap();
 
-    assert_eq!(
-        node_count(cx, &workspace),
-        before,
-        "a disabled tool must not arm place mode"
-    );
+    assert_eq!(node_count(cx, &workspace), before + 1);
+    let placed = cx.update(|cx| {
+        let document = workspace.read(cx).document(cx);
+        let document = document.read(cx);
+        document.selected().iter().next().cloned()
+    });
+    assert!(placed.is_some_and(|id| id.as_str().starts_with("agent_")));
+}
+
+/// Activity was the only tool that opened a node the canvas cannot render, and it never had a
+/// handler. Its slot is gone, and with it the trailing separator that grouped it apart.
+#[gpui_kit::test]
+fn the_toolbar_has_no_activity_slot(cx: &mut TestAppContext) {
+    let (handle, _) = open(cx);
+
+    cx.update_window(handle.into(), |_, window, _| {
+        assert!(window.try_find("View::ShowRunningQueries").is_none());
+        assert!(
+            window.try_find("Tool::Draw").is_some(),
+            "Draw is still last"
+        );
+    })
+    .unwrap();
 }
 
 /// The toolbar derives itself from the command registry, so a tool becomes usable the moment
@@ -191,7 +203,7 @@ fn the_lock_button_toggles_the_camera_lock(cx: &mut TestAppContext) {
 /// Locking the camera freezes pan and zoom, so the controls that would change it go with it —
 /// otherwise the cluster offers buttons that quietly do nothing visible. Asserted by behaviour
 /// rather than by the accessibility flag, which `Button` does not publish, and the same way
-/// `a_tool_with_no_registered_command_is_present_but_inert` checks the palette.
+/// `locking_the_camera_makes_the_zoom_controls_inert` checks the zoom cluster.
 #[gpui_kit::test]
 fn locking_the_camera_makes_the_zoom_controls_inert(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);

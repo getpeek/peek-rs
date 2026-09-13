@@ -41,10 +41,15 @@ impl McpServer {
     /// Returns the channel every tool call arrives on; the caller drains it on the main
     /// thread and answers each request against the document.
     ///
+    /// The socket is bound here, synchronously, rather than inside the spawned task: a port
+    /// already in use has to be an error the caller can report, and `port(0)` has to resolve to
+    /// the port the OS actually chose before [`McpServer::url`] can name it.
+    ///
     /// # Errors
-    /// Returns an error if the tokio runtime cannot be built. A bind failure surfaces
-    /// later, on the first request, because `serve` runs on the runtime.
+    /// Returns an error if the port cannot be bound or the tokio runtime cannot be built.
     pub fn serve(port: u16) -> std::io::Result<(Self, McpRequests)> {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port))?;
+        let port = listener.local_addr()?.port();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("peek-mcp")
@@ -52,7 +57,7 @@ impl McpServer {
             .build()?;
         let (bridge, requests) = ChannelBridge::new();
         runtime.spawn(async move {
-            if let Err(error) = crate::server::serve(port, Arc::new(bridge)).await {
+            if let Err(error) = crate::server::serve(listener, Arc::new(bridge)).await {
                 log::error!("peek: the MCP server stopped: {error}");
             }
         });
@@ -75,10 +80,18 @@ impl McpServer {
 mod tests {
     use super::*;
 
+    /// Port 0 lets the OS pick, so the test never collides with a real server — and the URL has
+    /// to name the port it picked, not the zero that was asked for, or an agent cannot connect.
     #[test]
-    fn the_url_is_loopback() {
-        // Port 0 lets the OS pick, so the test never collides with a real server.
-        let (server, _requests) = McpServer::serve(0).expect("the runtime builds");
-        assert_eq!(server.url(), "http://127.0.0.1:0/");
+    fn the_url_names_the_port_that_was_actually_bound() {
+        let (server, _requests) = McpServer::serve(0).expect("loopback binds");
+        assert_ne!(server.port(), 0, "the OS chose a real port");
+        assert_eq!(server.url(), format!("http://127.0.0.1:{}/", server.port()));
+    }
+
+    #[test]
+    fn a_port_already_in_use_is_reported_rather_than_hidden() {
+        let (first, _requests) = McpServer::serve(0).expect("loopback binds");
+        assert!(McpServer::serve(first.port()).is_err());
     }
 }

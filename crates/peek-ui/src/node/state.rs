@@ -13,12 +13,13 @@ use gpui_kit::{App, Entity, Window};
 use peek_canvas::Document;
 use peek_document::{Node, NodeId, NodeKind};
 
-use super::{query, result, text, variable};
+use super::{agent, query, result, text, variable};
 
 /// One kind's retained state. Kinds that are a pure function of their node have no variant;
 /// a kind gains one here when it grows an editor or a scroll position.
 #[derive(Debug)]
 pub(crate) enum NodeState {
+    Agent(agent::AgentState),
     Query(query::QueryState),
     Text(text::TextState),
     Variable(variable::VariableState),
@@ -30,6 +31,7 @@ impl NodeState {
     /// query editor holds a document in the language server and has to give it back.
     fn on_removed(&self, cx: &mut App) {
         match self {
+            Self::Agent(state) => state.on_removed(cx),
             Self::Query(state) => state.on_removed(cx),
             Self::Text(_) | Self::Variable(_) | Self::Result(_) => {}
         }
@@ -44,6 +46,9 @@ impl NodeState {
         cx: &mut App,
     ) -> Option<Self> {
         match &node.kind {
+            NodeKind::Agent(data) => Some(Self::Agent(agent::AgentState::new(
+                &node.id, data, document, window, cx,
+            ))),
             NodeKind::Query(data) => Some(Self::Query(query::QueryState::new(
                 &node.id, data, document, window, cx,
             ))),

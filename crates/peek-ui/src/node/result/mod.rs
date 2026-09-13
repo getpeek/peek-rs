@@ -21,7 +21,11 @@ mod aggregate;
 mod cells;
 mod column_roles;
 pub(crate) mod delegate;
+mod delete;
 mod detail;
+mod edit;
+mod editable;
+mod follow;
 mod json;
 mod search;
 mod selection;
@@ -105,7 +109,7 @@ pub(crate) struct ResultTable {
     pub(super) search_query: String,
     /// Dropping it cancels the pending search, so reassigning *is* restart-the-debounce.
     search_task: Task<()>,
-    _subscriptions: [gpui_kit::Subscription; 2],
+    _subscriptions: [gpui_kit::Subscription; 3],
 }
 
 impl ResultTable {
@@ -200,6 +204,11 @@ impl ResultTable {
     }
 
     #[cfg(test)]
+    pub(crate) fn deletable_rows_for_test(&self, cx: &App) -> Option<usize> {
+        self.deletable_rows(cx)
+    }
+
+    #[cfg(test)]
     pub(crate) fn is_search_open(&self) -> bool {
         self.search_open
     }
@@ -220,6 +229,14 @@ impl ResultTable {
         self.on_search_changed(query.to_string(), cx);
     }
 
+    /// Runs the queries a followed reference produced, with this result as their source so the
+    /// new nodes stack under it and the edges say where they came from.
+    fn follow_reference(&mut self, queries: Vec<String>, cx: &mut Context<Self>) {
+        let document = self.document.clone();
+        let node = self.node.clone();
+        crate::execution::run_queries(&document, &node, queries, cx);
+    }
+
     fn close_detail(&mut self, cx: &mut Context<Self>) {
         self.table.update(cx, |table, cx| {
             table.delegate_mut().set_detail(None);
@@ -230,6 +247,14 @@ impl ResultTable {
 
     /// Escape clears, and so does a press on the table's blank space.
     fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        if self.table.read(cx).delegate().editing().is_some() {
+            self.cancel_edit(cx);
+            return;
+        }
+        if self.table.read(cx).delegate().detail().is_some() {
+            self.close_detail(cx);
+            return;
+        }
         if self.search_open {
             // Escape closes the find bar first, as it does in the reference; a second escape
             // then reaches the canvas and clears the node selection.
@@ -315,7 +340,8 @@ impl ResultState {
         cx: &mut App,
     ) -> Self {
         let rows = document.read(cx).result(id).cloned().unwrap_or_default();
-        let delegate = ResultDelegate::new(rows, data.column_widths.as_ref());
+        let edit_input = cx.new(|cx| InputState::new(window, cx));
+        let delegate = ResultDelegate::new(rows, data.column_widths.as_ref(), edit_input.clone());
         let table = cx.new(|cx| {
             TableState::new(delegate, window, cx)
                 // The reference has no sorting or column reordering — clicking a header selects
@@ -345,6 +371,17 @@ impl ResultState {
                     },
                 ),
                 cx.subscribe(
+                    &edit_input,
+                    |this: &mut ResultTable, _, event: &InputEvent, cx| {
+                        // Enter commits a single-line edit; the reference uses it for the bool
+                        // picker and a modifier elsewhere, but every in-cell field here is one
+                        // line, so Enter is unambiguous.
+                        if matches!(event, InputEvent::PressEnter { .. }) {
+                            this.commit_edit(cx);
+                        }
+                    },
+                ),
+                cx.subscribe(
                     &search_input,
                     |this: &mut ResultTable, input, event: &InputEvent, cx| {
                         if matches!(event, InputEvent::Change) {
@@ -365,6 +402,12 @@ impl ResultState {
             search_input,
             search_query: String::new(),
             search_task: Task::ready(()),
+        });
+        let weak = inner.downgrade();
+        inner.update(cx, |this, cx| {
+            this.table
+                .update(cx, |table, _| table.delegate_mut().set_owner(weak));
+            let _ = cx;
         });
         Self { inner }
     }
@@ -470,6 +513,7 @@ impl Render for ResultTable {
                 cx.listener(|this, _, _, cx| this.clear_selection(cx)),
             )
             .child(self.toolbar(cx))
+            .children(self.edit_error(cx))
             .children(self.detail_pane(cx))
             .child(if empty {
                 empty_state("No results", cx)
@@ -984,6 +1028,177 @@ mod render_tests {
 
         shift_click_at(&mut visual, cell_at(bounds, 3.0, 0.0));
         assert_eq!(selection_label(cx, handle), "1 row selected");
+    }
+
+    /// Installs a schema where `orders.user_id` points at `users.id`.
+    fn with_references(cx: &mut TestAppContext) {
+        use std::collections::HashMap;
+
+        cx.update(|cx| {
+            let mut tables = HashMap::new();
+            tables.insert(
+                "orders".to_string(),
+                vec![("user_id".to_string(), "int4".to_string())],
+            );
+            let mut references = HashMap::new();
+            references.insert("users.id".to_string(), vec!["orders.user_id".to_string()]);
+            let index = peek_lsp::SchemaIndex::from_raw(tables, references, HashMap::new());
+            peek_lsp::set_schema(
+                &crate::node::query::language::SqlLanguage::schema(cx),
+                index,
+            );
+        });
+    }
+
+    /// Clicking a reference asks the database what it points at and puts the answer on the
+    /// canvas. Without a connection there is nothing to ask, so this pins the two halves that do
+    /// not need one: the cell is a link, and pressing it does not select instead.
+    #[gpui_kit::test]
+    fn a_reference_cell_is_a_link_and_does_not_select(cx: &mut TestAppContext) {
+        let (handle, workspace) = open(cx, 8);
+        with_references(cx);
+        cx.update(|cx| {
+            workspace.read(cx).document(cx).update(cx, |document, _| {
+                document.update_data::<peek_document::ResultData>(&result_node(), |data| {
+                    data.query = "select total, user_id from orders".to_string();
+                });
+                document.set_result(
+                    result_node(),
+                    ResultSet::new(
+                        vec![Column::new("total", "INT4"), Column::new("user_id", "INT4")],
+                        vec![vec![Cell::Int(5), Cell::Int(7)]],
+                    ),
+                );
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+
+        let linked = cx.update(|cx| {
+            workspace
+                .read(cx)
+                .result_table(&result_node(), cx)
+                .map(|table| table.read(cx).delegate().follows_references(1))
+        });
+        assert_eq!(linked, Some(true), "the reference column is followable");
+
+        let bounds = table_bounds(cx, handle);
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        click_at(&mut visual, cell_at(bounds, 0.0, 1.0));
+        assert_eq!(
+            selection_label(cx, handle),
+            "no selection",
+            "a press on a link belongs to the link, not to cell selection"
+        );
+    }
+
+    /// A column the schema says nothing about is not a link, so an ordinary cell still selects.
+    ///
+    /// This is why a `*_id` column with no schema behind it is tinted but inert: there is no
+    /// target to follow, only a name that looks like one.
+    #[gpui_kit::test]
+    fn a_column_with_no_known_target_is_not_a_link(cx: &mut TestAppContext) {
+        let (handle, workspace) = open(cx, 8);
+        let linked = cx.update(|cx| {
+            workspace
+                .read(cx)
+                .result_table(&result_node(), cx)
+                .map(|table| table.read(cx).delegate().follows_references(1))
+        });
+        assert_eq!(linked, Some(false));
+
+        let bounds = table_bounds(cx, handle);
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        click_at(&mut visual, cell_at(bounds, 0.0, 1.0));
+        assert_eq!(selection_label(cx, handle), "1 cell selected");
+    }
+
+    /// Double-clicking a short value opens an editor in the cell — and, crucially, does not
+    /// abort the process on the way.
+    ///
+    /// The cell's own handler runs inside a `TableState` update, and opening an editor reads
+    /// that same state back. Doing it there is a re-entrant borrow, which gpui turns into a
+    /// non-unwinding panic: the window dies with it. `open_cell` defers to the next turn.
+    ///
+    /// This needs a connection, which is why the first version of the suite could not have
+    /// caught it: every editing path bails before the read when there is nowhere to send an
+    /// UPDATE.
+    #[gpui_kit::test]
+    fn double_clicking_a_cell_opens_an_editor_without_re_entering_the_table(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, workspace) = open(cx, 8);
+        cx.update(|cx| {
+            crate::database::Database::mark_connected_for_test(cx);
+            // A single-table SELECT, so the result reads as editable.
+            workspace.read(cx).document(cx).update(cx, |document, _| {
+                document.update_data::<peek_document::ResultData>(&result_node(), |data| {
+                    data.query = "select id, name from peek_probe".to_string();
+                });
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+
+        let bounds = table_bounds(cx, handle);
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        double_click_at(&mut visual, cell_at(bounds, 1.0, 1.0));
+        visual.run_until_parked();
+
+        let editing = cx.update(|cx| {
+            workspace
+                .read(cx)
+                .result_table(&result_node(), cx)
+                .and_then(|table| {
+                    table
+                        .read(cx)
+                        .delegate()
+                        .editing()
+                        .map(|edit| (edit.row, edit.column))
+                })
+        });
+        assert_eq!(editing, Some((1, 1)), "the cell opened for editing");
+    }
+
+    /// Double-clicking a short value opens an editor in the cell.
+    ///
+    /// Nothing is editable without a connection, so this asserts the *refusal* — the commit path
+    /// itself is covered by `peek_db::mutation`'s builder tests and `editable`'s refusal tests.
+    #[gpui_kit::test]
+    fn a_cell_does_not_open_for_editing_without_a_connection(cx: &mut TestAppContext) {
+        let (handle, workspace) = open(cx, 4);
+        let bounds = table_bounds(cx, handle);
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        double_click_at(&mut visual, cell_at(bounds, 0.0, 0.0));
+
+        let editing = cx.update(|cx| {
+            workspace
+                .read(cx)
+                .result_table(&result_node(), cx)
+                .and_then(|table| table.read(cx).delegate().editing().map(|_| ()))
+        });
+        assert!(
+            editing.is_none(),
+            "there is nowhere to send an UPDATE, so the cell stays read-only"
+        );
+    }
+
+    /// The delete affordance only appears when there are rows selected in a result that can be
+    /// written — the one irreversible action must never sit there inviting a stray click.
+    #[gpui_kit::test]
+    fn delete_is_not_offered_without_a_connection(cx: &mut TestAppContext) {
+        let (handle, workspace) = open(cx, 4);
+        let bounds = table_bounds(cx, handle);
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        shift_click_at(&mut visual, cell_at(bounds, 1.0, 0.0));
+
+        let offered = cx.update(|cx| {
+            workspace
+                .read(cx)
+                .result_inner(&result_node(), cx)
+                .and_then(|table| table.read(cx).deletable_rows_for_test(cx))
+        });
+        assert_eq!(offered, None);
     }
 
     /// A JSON cell shows a one-line summary in the grid; double-clicking opens its full tree in

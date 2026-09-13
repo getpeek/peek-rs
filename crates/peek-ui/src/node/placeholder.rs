@@ -1,5 +1,5 @@
-//! What a shell shows until the real node body for its kind lands. Only the kinds waiting on
-//! a backend still come through here: Query, Result, `ResultInsertForm`, Agent and Activity.
+//! What a shell shows until the real node body for its kind lands. Two kinds still come
+//! through here: `ResultInsertForm` and Activity.
 
 use gpui_kit::prelude::*;
 use gpui_kit::{AnyElement, App, div, rems};

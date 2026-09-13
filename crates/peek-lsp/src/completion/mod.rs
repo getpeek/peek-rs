@@ -1,7 +1,10 @@
 mod fk_inference;
 mod keywords;
+mod ranking;
 #[cfg(test)]
 mod tests;
+
+pub(crate) use ranking::rank;
 
 use lsp_types::{CompletionItem, CompletionItemKind, CompletionTextEdit, Range, TextEdit};
 
@@ -22,8 +25,8 @@ pub(crate) fn complete(
             let mut items = table_items(schema);
             // The cursor here sits where a table name is expected, but the
             // user may also be starting a continuation keyword (e.g. typing
-            // "w" to begin "where" after `from users`). The editor filters
-            // by prefix; tables and keywords coexist without conflict.
+            // "w" to begin "where" after `from users`). `rank` settles it
+            // from the typed prefix; nothing downstream filters.
             items.extend(keywords::general_clause_keyword_items());
             items
         }
@@ -61,7 +64,7 @@ pub(crate) fn complete(
 /// An item that carries only `insert_text` leaves the replaced span implicit, and the editor
 /// then inserts at the cursor: typing `ads` and picking `ads_users` yields `adsads_users`.
 /// An explicit edit says which characters the completion stands in for.
-pub(crate) fn anchor_to_typed_prefix(items: &mut [CompletionItem], source: &str, cursor: usize) {
+pub fn anchor_to_typed_prefix(items: &mut [CompletionItem], source: &str, cursor: usize) {
     let range = Range {
         start: byte_offset_to_position(source, prefix_start(source, cursor)),
         end: byte_offset_to_position(source, cursor),
@@ -73,6 +76,11 @@ pub(crate) fn anchor_to_typed_prefix(items: &mut [CompletionItem], source: &str,
             .unwrap_or_else(|| item.label.clone());
         item.text_edit = Some(CompletionTextEdit::Edit(TextEdit { range, new_text }));
     }
+}
+
+/// The identifier the cursor sits in — what `rank` filters on and what a completion replaces.
+pub(crate) fn typed_prefix(source: &str, cursor: usize) -> &str {
+    &source[prefix_start(source, cursor)..cursor]
 }
 
 /// Where the word under the cursor begins. A qualifier ends it: at `u.na` the items are
@@ -87,7 +95,7 @@ fn prefix_start(source: &str, cursor: usize) -> usize {
 }
 
 fn table_items(schema: &SchemaIndex) -> Vec<CompletionItem> {
-    let mut items: Vec<CompletionItem> = schema
+    schema
         .tables
         .keys()
         .map(|name| CompletionItem {
@@ -97,9 +105,7 @@ fn table_items(schema: &SchemaIndex) -> Vec<CompletionItem> {
             detail: Some("table".to_string()),
             ..Default::default()
         })
-        .collect();
-    items.sort_by(|a, b| a.label.cmp(&b.label));
-    items
+        .collect()
 }
 
 fn column_items_for_table(table: &str, schema: &SchemaIndex) -> Vec<CompletionItem> {

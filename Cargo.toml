@@ -34,6 +34,7 @@ peek-lsp = { path = "crates/peek-lsp" }
 peek-db = { path = "crates/peek-db" }
 peek-acp = { path = "crates/peek-acp" }
 peek-mcp = { path = "crates/peek-mcp" }
+peek-ollama = { path = "crates/peek-ollama" }
 gpui-kit = { version = "0.6.1", features = ["tree-sitter-sql"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -80,6 +81,11 @@ axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 schemars = "1"
 async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "stream",
+  "rustls-tls",
+] }
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

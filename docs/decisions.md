@@ -64,10 +64,13 @@ Decisions taken with the user, plus reasoning that is not visible in the code.
 - **`Instant::now()` is called in exactly one place**, `Document::begin`, and passed into
   `History::record`. That makes the 300 ms coalescing deterministic in tests with synthetic
   instants and no sleeps.
-- **Nodes are placed on mouse-up, not on drag start.** The TypeScript app creates the node when
-  the placement drag begins and mutates it every frame; computing the rect in the reducer and
-  creating once on release looks identical, but keeps one undo entry and one autosave, and leaves
-  nothing to clean up when a placement is cancelled.
+- **Nodes are placed on the drag's first frame, not on mouse-up**, as the TypeScript app does:
+  a rectangle drawn through the marquee overlay says nothing about what will appear, and a node
+  that is real from the first frame shows its kind, its header and its minimum size while it is
+  being sized. It costs the reducer an `Effect` triple (`PlaceNode`, `ResizePlacement`,
+  `CommitPlacement`) and the view the `NodeId` the document minted; it costs undo nothing,
+  because `resize_placement` opens no transaction and the creation's `Structure` one is sealed
+  by the release.
 - **Writing is a CLI flag, not a settings key.** `settings.json` is shared with the Tauri app,
   which deserialises into a typed struct and would drop an unknown key on its next save. One
   mechanism, not two: `--write` opts in, and `WorkspaceView::with_document` — the constructor

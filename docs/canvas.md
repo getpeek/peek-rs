@@ -50,13 +50,52 @@ whole pointer model, tested per row:
 | Left down on a node header, moved ≥ 4 px | `DraggingNodes` of the selection (an unselected node is selected first) |
 | Left down on a node body | `SelectOnly` on release; never a drag and never a marquee |
 | Left down on a node's resize zone | `ResizingNode` → `ResizeNode { id, bounds }` per move |
-| Tool armed, click | `PlaceNode` with the default size centred on the cursor |
-| Tool armed, drag ≥ 4 px | `PlaceNode` with the dragged rect, clamped to `min_size` |
+| Tool armed, click | `PlaceNode` with the default size centred on the cursor, then `CommitPlacement` |
+| Tool armed, drag ≥ 4 px | `PlaceNode` with the dragged rect on the first frame past the threshold, `ResizePlacement` per move after it, `CommitPlacement` on release |
+| Pen armed, left drag | a sample per move in world units; `PlaceDrawing` on release from two samples up |
+| Pen armed, any other button | nothing: the pen owns the pointer, and wheel and pinch still pan and zoom |
 | Camera locked | pan/zoom effects dropped; selection and drags still work |
 | Gesture end | `GestureEnded` → commit viewport |
 
 The gpui side (`peek-ui/src/canvas/mod.rs`) only translates events into `Input`, applies
 `Effect`s to the camera or the `Document`, and notifies.
+
+## The draw tool
+
+`Tool::Draw` (`d`, and the toolbar's pencil) arms the pen. It is the only **sticky** tool:
+`useDrawTool.ts` never clears place mode, so a committed stroke leaves it armed for the next
+one until escape — every other place tool is one-shot.
+
+While the pen is armed it owns the pointer, which is what the reference's `stopPropagation`
+buys: no press reaches the pan, marquee, drag or resize paths, so a stroke started over a node
+draws instead of moving it. `gesture::on_drawing` is offered every input before the ordinary
+reducer and hands back wheel and pinch, so two-finger scroll and pinch zoom keep working.
+
+Three deltas from the reference, each recorded where it is made:
+
+- **Samples are world units, converted on arrival.** The reference buffers client coordinates
+  and converts the batch at commit, which is only equivalent because its camera cannot move
+  mid-stroke. Converting here keeps the camera off the commit path, so a pan during a stroke
+  moves the ink with the canvas instead of shearing it.
+- **No pressure is recorded.** gpui's `MouseMoveEvent` carries none, and the reference stores
+  `e.pressure || 0.5` — a constant for every mouse stroke. `simulate_pressure` derives width
+  from sample spacing, so the stored `0.5` is never read back.
+- **A non-left press does nothing.** The reference returns before its `stopPropagation`, so
+  React Flow's `panOnDrag={[1, 2]}` still pans mid-mode; matching that would mean teaching
+  `Panning` to return to `Drawing` on release. The loss is middle-drag, right-drag and
+  space-drag until escape.
+
+`Document::create_drawing` is the commit, and it is one undo step: the node and its data go in
+one `transaction`, so undoing a stroke never leaves an empty drawing behind. The geometry is
+the reference's — the samples' extent inset by `PADDING = stroke_width * 2 = 8` on every side,
+points stored relative to the node's origin. The colour is set explicitly to `var(--pk-fg)`,
+because `NodeKind::empty` yields `makeNode`'s palette default of `white` and every stroke would
+otherwise be invisible in a light theme.
+
+The live preview is `LiveStroke.tsx`: pane-relative screen points painted above the nodes, at
+`stroke_width * 4 * zoom`, through the same `node::draw::tessellate` the committed node uses so
+the shape cannot change at the moment the pen lifts. It shares `peek_canvas`'s `DRAW_COLOR` and
+`DRAW_STROKE_WIDTH` with the commit for the same reason.
 
 ## Node hit regions
 
@@ -135,10 +174,19 @@ release still selects.
 ## Placement
 
 `Input::ArmTool(Some(kind))` puts the reducer in `Interaction::Placing` (crosshair cursor);
-escape clears it through the existing `Tool::Select` handler. Unlike the TypeScript app, which
-creates the node on drag start and mutates it every frame, the rect is computed in the reducer
-and the node is created **once** on mouse-up — same look through the same overlay the marquee
-uses, but no undo or autosave churn and nothing to clean up when a placement is cancelled.
+escape clears it through the existing `Tool::Select` handler. As in the TypeScript app
+(`usePlaceTool.ts`), the node is created on the first move past the drag threshold and resized
+every frame after it, so what the drag sizes is the node itself rather than a preview rectangle;
+a click without a drag places a default-size node centred on the cursor. The release
+(`Effect::CommitPlacement`) frames the node at 100 % and hands a query node straight to its SQL
+editor.
+
+The reducer stays pure: it emits `PlaceNode`, then `ResizePlacement`, then `CommitPlacement`, and
+the canvas view holds the `NodeId` the document minted. The whole drag is **one undo step** —
+`Document::create_node` opens an `EditKind::Structure` transaction and `resize_placement` opens
+none, so the checkpoint at the release seals the lot. Escape mid-drag calls
+`Document::cancel_placement`, which removes the node and discards that transaction, leaving
+nothing to undo.
 
 ## Node zoom strategy
 
@@ -239,6 +287,19 @@ the *canvas* does with the press (drag the card, marquee, select), not whether t
 change event that carries it to the document, and a frame can render in between. A view that
 re-adopts the document's text unconditionally will push the older value back over what was just
 typed. Gate the re-adoption on `Document::revision()` changing.
+
+**A component's own callbacks run inside its update, so they must not reach back into it.**
+`DataTable` builds its cells through the delegate, so a handler attached in `render_td` fires
+while `TableState` is mid-update. Calling anything that *reads that state back* from there — the
+Result node's editor did, to fetch the draft and the editable table — is a re-entrant borrow, and
+gpui turns it into a **non-unwinding panic**: the process aborts, taking the window with it. It
+is not a crash the user can dismiss.
+
+The escape hatch is `window.defer`, which runs the work on the next turn, once the update has
+finished; the Text node already uses it for its auto-grow. The test that pins it
+(`double_clicking_a_cell_opens_an_editor_without_re_entering_the_table`) needs a connection,
+because every editing path bails before the read without one — which is why the hermetic suite
+could not have caught it first time, and why `Database::mark_connected_for_test` exists.
 
 **Overlays lay out outside the rem scope.** Anything gpui renders in the window overlay —
 popovers, tooltips, menus — is laid out at rem 1 whatever the camera is doing, because the rem

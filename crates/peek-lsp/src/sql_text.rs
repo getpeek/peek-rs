@@ -51,6 +51,30 @@ pub fn variable_sites(query: &str) -> Vec<VariableSite> {
     sites
 }
 
+/// The variable name being typed at `cursor`, when the word there is introduced by `@`.
+///
+/// `@` is not an identifier character, so the name may be empty: typing `@` alone offers every
+/// variable, which is what `SqlEditor.tsx`'s `@(\w*)$` matches. The same
+/// not-preceded-by-a-word-character rule as [`variable_sites`] applies, so `users@ema` is a
+/// half-typed address rather than a reference.
+#[must_use]
+pub fn variable_prefix_at(query: &str, cursor: usize) -> Option<&str> {
+    let before = query.get(..cursor)?;
+    let bytes = before.as_bytes();
+    // Every `is_word_byte` is ASCII, so this can never stop inside a multi-byte character.
+    let mut start = bytes.len();
+    while start > 0 && is_word_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+    if start == 0 || bytes[start - 1] != b'@' {
+        return None;
+    }
+    if start >= 2 && is_word_byte(bytes[start - 2]) {
+        return None;
+    }
+    Some(&before[start..])
+}
+
 fn is_word_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
@@ -239,6 +263,30 @@ mod tests {
         let query = "limit @count";
         let site = &variable_sites(query)[0];
         assert_eq!(&query[site.start..site.end], "@count");
+    }
+
+    #[test]
+    fn a_half_typed_variable_is_offered_its_name() {
+        let query = "select * from t where id = @li";
+        assert_eq!(variable_prefix_at(query, query.len()), Some("li"));
+    }
+
+    #[test]
+    fn a_bare_at_sign_offers_every_variable() {
+        let query = "select * from t where id = @";
+        assert_eq!(variable_prefix_at(query, query.len()), Some(""));
+    }
+
+    #[test]
+    fn a_word_without_an_at_sign_is_not_a_variable() {
+        let query = "select * from users";
+        assert_eq!(variable_prefix_at(query, query.len()), None);
+    }
+
+    #[test]
+    fn a_half_typed_email_is_not_a_variable() {
+        let query = "select * from t where email = 'user@exa";
+        assert_eq!(variable_prefix_at(query, query.len()), None);
     }
 
     #[test]

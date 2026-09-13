@@ -21,6 +21,11 @@ use peek_theme::ActivePeekTheme;
 use super::ResultTable;
 use super::json::{self, Token};
 
+/// Longer than this and a value opens in the pane rather than an in-cell field, which would
+/// clip it. Matches the middle-truncation threshold, so anything the grid shortens is editable
+/// somewhere it fits whole.
+pub(super) const INLINE_LIMIT: usize = 36;
+
 /// How tall the pane is allowed to get before it scrolls, in rems of the node's own scale.
 const MAX_HEIGHT: f32 = 11.0;
 

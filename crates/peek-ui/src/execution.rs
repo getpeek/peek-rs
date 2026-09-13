@@ -143,6 +143,92 @@ pub(crate) fn run(
     Run::Started
 }
 
+/// Runs several statements from `source`, placing each result beside it.
+///
+/// `executeQueries`' fan-out, which the single-statement [`run`] does not cover: the follow-
+/// references path issues one query per foreign key and wants them all on the canvas. Each is
+/// executed and placed **in turn**, and each failure is caught on its own — statement three
+/// failing does not stop statement four, exactly as the reference loops.
+///
+/// The source may be any node. Following a reference from a result makes that result the source,
+/// so the new nodes stack under it and the edge says where they came from.
+pub(crate) fn run_queries(
+    document: &Entity<Document>,
+    source: &NodeId,
+    queries: Vec<String>,
+    cx: &mut App,
+) {
+    if queries.is_empty() || !Database::is_connected(cx) {
+        return;
+    }
+    let Some(session) = Database::session(cx) else {
+        return;
+    };
+    let document = document.clone();
+    let source = source.clone();
+
+    cx.spawn(async move |cx| {
+        let mut placed = Vec::new();
+        for (index, query) in queries.into_iter().enumerate() {
+            let outcome = session.query(query.clone()).await;
+            let updated = cx.update(|cx| {
+                document.update(cx, |document, cx| {
+                    let id = match outcome {
+                        Ok(Ok(rows)) => {
+                            let (id, _) = document.place_result(&source, (&query, index), rows);
+                            Some(id)
+                        }
+                        Ok(Err(error)) => {
+                            document.place_query_error(&source, &query, &error.to_string());
+                            None
+                        }
+                        Err(_) => {
+                            document.place_query_error(
+                                &source,
+                                &query,
+                                "the database runtime stopped",
+                            );
+                            None
+                        }
+                    };
+                    cx.notify();
+                    id
+                })
+            });
+            if let Some(id) = updated {
+                placed.push(id);
+            }
+        }
+
+        // Selecting what arrived is how the user finds it: the new nodes may be off-screen, and
+        // `Zoom::FitSelection` then frames exactly them.
+        if !placed.is_empty() {
+            cx.update(|cx| {
+                document.update(cx, |document, cx| {
+                    if document.select_only(placed) {
+                        cx.notify();
+                    }
+                });
+            });
+        }
+    })
+    .detach();
+}
+
+/// Re-runs the query that produced `result`, which is how a result refreshes after a row is
+/// edited or deleted.
+///
+/// Going back through the query node rather than re-issuing the SQL means the variables are
+/// re-resolved and the rows re-placed by the one path, exactly as a manual re-run would.
+/// Already-confirmed: the statement being re-run is the one that produced these rows.
+pub(crate) fn rerun_source(document: &Entity<Document>, result: &NodeId, cx: &mut App) {
+    let Some(query) = document.read(cx).source_query_of(result) else {
+        log::info!("peek: {result} has no query node to refresh from");
+        return;
+    };
+    run(document, &query, true, cx);
+}
+
 /// `isRunning` is persisted, so a crash mid-query would leave a node spinning forever;
 /// `peek_document::normalize` clears it on load for exactly that reason.
 fn set_running(document: &Entity<Document>, node: &NodeId, running: bool, cx: &mut App) {
@@ -162,7 +248,7 @@ mod tests {
         VariableValue,
     };
 
-    use super::{Plan, Run, plan, run};
+    use super::{Plan, Run, plan, run, run_queries};
 
     fn with_query(sql: &str) -> (Document, NodeId) {
         let mut document = Document::load(CanvasDocument::empty());
@@ -379,6 +465,88 @@ mod tests {
                 data.is_running,
                 Some(false),
                 "the running flag is cleared, or the node would spin forever"
+            );
+        });
+    }
+
+    /// Following a reference places a result node holding the referenced rows.
+    ///
+    /// The half that needs a database: `run_queries` is the fan-out the single-statement `run`
+    /// does not cover, and this is what a reference click ends in.
+    ///
+    /// Opt-in on `PEEK_TEST_DATABASE_URL`, like the rest of the live tests.
+    #[gpui_kit::test]
+    async fn following_a_reference_places_the_rows_it_points_at(cx: &mut gpui_kit::TestAppContext) {
+        let Ok(url) = std::env::var("PEEK_TEST_DATABASE_URL") else {
+            return;
+        };
+        cx.background_executor.allow_parking();
+
+        cx.update(|cx| {
+            let config = peek_config::PeekConfig::default();
+            crate::init(&config, cx);
+            crate::database::Database::connect(
+                &peek_config::DatabaseConnection {
+                    name: "test".to_string(),
+                    color: String::new(),
+                    url,
+                    ssh_tunnel: None,
+                },
+                cx,
+            );
+        });
+        for _ in 0..100 {
+            if cx.update(|cx| crate::database::Database::is_connected(cx)) {
+                break;
+            }
+            cx.background_executor
+                .timer(std::time::Duration::from_millis(50))
+                .await;
+        }
+        assert!(cx.update(|cx| crate::database::Database::is_connected(cx)));
+
+        let document = cx.update(|cx| cx.new(|_| Document::load(CanvasDocument::empty())));
+        // A result node stands in for the one a reference was clicked in.
+        let source = document.update(cx, |document, _| {
+            document.create_node(
+                NodeType::Result,
+                Rect::new(Point::new(0.0, 0.0), Size::new(600.0, 440.0)),
+            )
+        });
+
+        cx.update(|cx| {
+            run_queries(
+                &document,
+                &source,
+                vec!["select 1 as id, 'referenced' as label".to_string()],
+                cx,
+            );
+        });
+
+        let placed = NodeId::result_of(&source, 0);
+        for _ in 0..100 {
+            if document.read_with(cx, |document, _| document.node(&placed).is_some()) {
+                break;
+            }
+            cx.background_executor
+                .timer(std::time::Duration::from_millis(50))
+                .await;
+        }
+
+        document.read_with(cx, |document, _| {
+            assert!(
+                document.node(&placed).is_some(),
+                "a result node was placed for the followed reference"
+            );
+            let rows = document.result(&placed).expect("holding its rows");
+            assert_eq!(rows.row_count(), 1);
+            assert_eq!(rows.columns()[1].name, "label");
+            assert!(
+                document
+                    .edges()
+                    .iter()
+                    .any(|edge| edge.source == source && edge.target == placed),
+                "and an edge back to where it came from"
             );
         });
     }

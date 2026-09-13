@@ -4,18 +4,23 @@
 //! every query node in the process — the shape the Tauri host used, with its commands replaced
 //! by direct calls.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use gpui_kit::base::input::{CompletionProvider, Rope};
-use gpui_kit::{App, Global, Task, Window};
+use gpui_kit::{App, Global, Task, WeakEntity, Window};
+use peek_canvas::Document;
 use peek_document::NodeId;
-use peek_lsp::lsp_types::{self, CompletionContext, CompletionResponse, Uri};
+use peek_lsp::lsp_types::{
+    self, CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, Uri,
+};
 
-/// The characters that open the completion menu, from `lspProvider.ts`'s `triggerCharacters`
-/// plus Monaco's `quickSuggestions`, which keeps it open while an identifier is being typed.
-const TRIGGERS: [char; 5] = [' ', '.', ',', '\n', '\t'];
+/// The characters that open the completion menu, from `lspProvider.ts`'s `triggerCharacters`,
+/// the `@` of its second provider, and Monaco's `quickSuggestions`, which keeps the menu open
+/// while an identifier is being typed.
+const TRIGGERS: [char; 6] = [' ', '.', ',', '\n', '\t', '@'];
 
 pub(crate) struct SqlLanguage {
     backend: Arc<peek_lsp::Backend>,
@@ -82,13 +87,78 @@ pub(crate) fn close(uri: &Uri, cx: &App) {
 ///
 /// Nothing is converted on the way through: gpui-base and `peek-lsp` are both built on
 /// `lsp-types` 0.97, so a `CompletionItem` from one is a `CompletionItem` to the other.
+///
+/// It answers for two of the reference's providers, not one: `lspProvider.ts` for SQL, and the
+/// `@`-triggered variable provider `SqlEditor.tsx` registers beside it.
 pub(crate) struct SqlCompletions {
     uri: Uri,
+    node: NodeId,
+    /// Whether the completion menu was open when this keystroke arrived, mirrored by
+    /// [`super::QueryEditor`] — see [`SqlCompletions::is_completion_trigger`]. It cannot be read
+    /// off the editor here: every provider call happens *inside* that entity's own update, and
+    /// gpui refuses to hand out a second borrow of it.
+    menu_open: Rc<Cell<bool>>,
+    /// Where `@variable` names come from. Weak because the editor holds this provider for the
+    /// node's whole life, and a strong handle here would keep a page's document alive after the
+    /// canvas has moved on from it.
+    document: WeakEntity<Document>,
+}
+
+impl std::fmt::Debug for SqlCompletions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SqlCompletions")
+            .field("node", &self.node)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SqlCompletions {
-    pub(crate) fn new(uri: Uri) -> Rc<Self> {
-        Rc::new(Self { uri })
+    /// `None` when the node id does not spell a URI, which leaves the editor without language
+    /// support rather than panicking.
+    pub(crate) fn new(
+        node: NodeId,
+        menu_open: Rc<Cell<bool>>,
+        document: WeakEntity<Document>,
+    ) -> Option<Rc<Self>> {
+        Some(Rc::new(Self {
+            uri: uri_for(&node)?,
+            node,
+            menu_open,
+            document,
+        }))
+    }
+
+    /// The canvas variables feeding this node, as `@name` items.
+    ///
+    /// Filtered and ordered here rather than in `peek-lsp`, which knows nothing about canvas
+    /// edges. The reference pins them above SQL suggestions with `sortText: "0_"`; here they are
+    /// the only answer while an `@` is being typed, which is the same outcome.
+    fn variable_items(&self, prefix: &str, cx: &App) -> Vec<CompletionItem> {
+        let Some(document) = self.document.upgrade() else {
+            return Vec::new();
+        };
+        let lowered = prefix.to_lowercase();
+        document
+            .read(cx)
+            .variables_for(&self.node)
+            .into_keys()
+            .filter(|name| name.to_lowercase().starts_with(&lowered))
+            .map(|name| {
+                let label = format!("@{name}");
+                // The menu highlights `0..filter_text.len()` of the label, so this is the `@`
+                // plus what was typed. Counted in characters, never bytes.
+                let matched: String = label.chars().take(1 + prefix.chars().count()).collect();
+                CompletionItem {
+                    label,
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    insert_text: Some(name),
+                    detail: Some("variable".to_string()),
+                    filter_text: Some(matched),
+                    ..Default::default()
+                }
+            })
+            .collect()
     }
 }
 
@@ -101,19 +171,38 @@ impl CompletionProvider for SqlCompletions {
         _window: &mut Window,
         cx: &mut App,
     ) -> Task<anyhow::Result<CompletionResponse>> {
-        let backend = SqlLanguage::backend(cx);
-        // The document is re-sent rather than relied upon: the 30 ms sync debounce means the
-        // cached tree can be a few keystrokes stale, and the cursor context changes with every
-        // character. `lspProvider.ts` ships the whole text on every request for the same reason.
-        backend.did_change(self.uri.clone(), text.to_string());
-        let items = backend.completion_at_offset(&self.uri, offset);
-        // Synchronous: a query-sized document re-parses in microseconds, so there is nothing
-        // to wait for. `Backend` is `Sync`, so this can move to a background task if a
-        // pathological query ever costs a frame.
+        let source = text.to_string();
+        // Owned so `source` can be handed to the backend below; the prefix borrows it otherwise.
+        let variable_prefix = peek_lsp::variable_prefix_at(&source, offset).map(str::to_owned);
+
+        let Some(prefix) = variable_prefix else {
+            let backend = SqlLanguage::backend(cx);
+            // The document is re-sent rather than relied upon: the 30 ms sync debounce means the
+            // cached tree can be a few keystrokes stale, and the cursor context changes with
+            // every character. `lspProvider.ts` ships the whole text on every request for the
+            // same reason.
+            backend.did_change(self.uri.clone(), source);
+            // Synchronous: a query-sized document re-parses in microseconds, so there is nothing
+            // to wait for. `Backend` is `Sync`, so this can move to a background task if a
+            // pathological query ever costs a frame.
+            let items = backend.completion_at_offset(&self.uri, offset);
+            return Task::ready(Ok(CompletionResponse::Array(items)));
+        };
+
+        let mut items = self.variable_items(&prefix, cx);
+        // `@` is not an identifier character, so the anchored range covers the name alone and
+        // the `@` the user typed survives — `SqlEditor.tsx` computes the same range by hand.
+        peek_lsp::anchor_to_typed_prefix(&mut items, &source, offset);
         Task::ready(Ok(CompletionResponse::Array(items)))
     }
 
     fn is_completion_trigger(&self, _offset: usize, new_text: &str, _cx: &mut App) -> bool {
+        // A deletion. Re-query so a menu narrowed by the old prefix widens again as characters
+        // come off — nothing else on the deletion path refreshes or closes it. An already-closed
+        // menu stays closed, which is the rule Monaco's suggest model uses.
+        if new_text.is_empty() {
+            return self.menu_open.get();
+        }
         is_trigger(new_text)
     }
 }
@@ -140,7 +229,7 @@ mod tests {
 
     #[test]
     fn the_reference_trigger_characters_open_the_menu() {
-        for trigger in [" ", ".", ",", "\n", "\t"] {
+        for trigger in [" ", ".", ",", "\n", "\t", "@"] {
             assert!(is_trigger(trigger), "{trigger:?} should trigger");
         }
     }
@@ -152,6 +241,8 @@ mod tests {
         assert!(!is_trigger("'"));
     }
 
+    /// Typing nothing is not a trigger. A *deletion* is handled a level up, in
+    /// `is_completion_trigger`, which re-queries only while a menu is already open.
     #[test]
     fn an_empty_edit_does_not_trigger() {
         assert!(!is_trigger(""));

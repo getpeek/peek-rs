@@ -167,8 +167,16 @@ impl CanvasDocument {
 
     /// Appends the page and makes it active, as `useCanvas.addPage` does.
     pub fn insert_page(&mut self, page: Page) {
+        let order = self.page_order.len();
+        self.insert_page_at(page, order);
+    }
+
+    /// Inserts the page at `order` in the page list and makes it active. `order` is clamped to
+    /// the current count, so the agent tools' `create_page` can pass an unchecked number.
+    pub fn insert_page_at(&mut self, page: Page, order: usize) {
         let id = page.id.clone();
-        self.page_order.push(id.clone());
+        let order = order.min(self.page_order.len());
+        self.page_order.insert(order, id.clone());
         self.pages.insert(id.clone(), page);
         self.active_page_id = id;
     }
@@ -203,5 +211,40 @@ impl CanvasDocument {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CanvasDocument, Page};
+
+    fn names(document: &CanvasDocument) -> Vec<&str> {
+        document
+            .ordered_pages()
+            .map(|page| page.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_page_lands_at_the_order_it_asks_for() {
+        let mut document = CanvasDocument::empty();
+        document.insert_page(Page::new("second"));
+        document.insert_page_at(Page::new("first"), 0);
+
+        assert_eq!(names(&document)[0], "first");
+        assert_eq!(
+            document.active_page().map(|page| page.name.as_str()),
+            Some("first")
+        );
+    }
+
+    /// `create_page` takes the order straight from the agent, so an out-of-range number has to
+    /// append rather than panic on `Vec::insert`.
+    #[test]
+    fn an_order_past_the_end_appends() {
+        let mut document = CanvasDocument::empty();
+        document.insert_page_at(Page::new("last"), 99);
+
+        assert_eq!(names(&document).last().copied(), Some("last"));
     }
 }

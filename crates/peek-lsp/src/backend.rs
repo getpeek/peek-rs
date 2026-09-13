@@ -3,7 +3,7 @@ use std::sync::Arc;
 use lsp_types::{CompletionItem, Diagnostic, Position, Uri};
 use parking_lot::RwLock;
 
-use super::completion::{anchor_to_typed_prefix, complete};
+use super::completion::{anchor_to_typed_prefix, complete, rank, typed_prefix};
 use super::context::analyze_cursor;
 use super::diagnostics::diagnose;
 use super::documents::{DocumentEntry, DocumentStore};
@@ -94,6 +94,9 @@ fn items_at(doc: &DocumentEntry, byte_offset: usize, schema: &SchemaIndex) -> Ve
     let ctx = analyze_cursor(&doc.tree, source, byte_offset);
     let scope = Scope::collect(&doc.tree, source);
     let mut items = complete(&ctx, &scope, schema);
+    // Ranking first, so anchoring only touches survivors — and so a completion still replaces
+    // the prefix it was filtered by rather than appending to it.
+    rank(&mut items, typed_prefix(&doc.text, byte_offset));
     anchor_to_typed_prefix(&mut items, &doc.text, byte_offset);
     items
 }
@@ -160,6 +163,33 @@ mod tests {
         let backend = Backend::new(Arc::new(RwLock::new(fixture_schema())));
         backend.did_change(uri(), "select 1".to_string());
         assert!(backend.completion_at_offset(&uri(), 999).is_empty());
+    }
+
+    #[test]
+    fn typing_a_prefix_narrows_the_completion_list() {
+        let backend = Backend::new(Arc::new(RwLock::new(fixture_schema())));
+        backend.did_change(uri(), "select * from us".to_string());
+        let labels: Vec<String> = backend
+            .completion_at_offset(&uri(), 16)
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        assert_eq!(labels, ["users"]);
+    }
+
+    /// Pins `rank` ahead of `anchor_to_typed_prefix`: a survivor still replaces the prefix it
+    /// was filtered by, rather than being appended to it.
+    #[test]
+    fn a_ranked_completion_still_replaces_the_typed_prefix() {
+        let backend = Backend::new(Arc::new(RwLock::new(fixture_schema())));
+        backend.did_change(uri(), "select * from us".to_string());
+        let items = backend.completion_at_offset(&uri(), 16);
+        let Some(lsp_types::CompletionTextEdit::Edit(edit)) = items[0].text_edit.clone() else {
+            panic!("a ranked item carries an explicit edit");
+        };
+        assert_eq!(edit.range.start.character, 14);
+        assert_eq!(edit.range.end.character, 16);
+        assert_eq!(edit.new_text, "users");
     }
 
     #[test]

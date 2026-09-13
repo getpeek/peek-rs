@@ -36,15 +36,17 @@ default key translates.
 
 Implemented ids so far: `Zoom::{In,Out,Reset,FitView,FitSelection}`, `Edit::SelectAll`,
 `Edit::DeleteSelection`, `History::{Undo,Redo}`, `Tool::Select` (escape → clear selection),
-`Tool::{Text,Variable}`, `Page::{New,Close,Previous,Next}`,
+`Tool::{Query,Agent,Text,Variable,Draw}`, `Page::{New,Close,Previous,Next}`,
 `Page::{GoToNode,SelectNodeLeft,SelectNodeRight,SelectNodeUp,SelectNodeDown}`,
 `Query::{Focus,Format,Run}`, `Edit::Copy`, `Page::Search`,
-`View::{ToggleCameraLock,ToggleUi}`, `CommandPalette::Open`, `Theme::Open`, `App::Quit`. The remaining keymap ids from
+`View::{ToggleCameraLock,ToggleUi}`, `Agent::{Fork,CycleMode,Stop}`, `CommandPalette::Open`,
+`Theme::Open`, `App::Quit`. The remaining keymap ids from
 `src-tauri/src/config/keymap.rs` are added as their features land.
 
 `History::{Undo,Redo}` are bound on `CANVAS`, which excludes `Input`, so
-gpui-kit's own `cmd-z` wins while a node editor has focus. `Tool::{Text,Variable}` arm place
-mode rather than creating a node directly; the next click places it.
+gpui-kit's own `cmd-z` wins while a node editor has focus. `Tool::{Query,Agent,Text,Variable}` arm place
+mode rather than creating a node directly; the next click places it. `Tool::Draw` arms the pen
+instead, which is sticky — see "The draw tool" in `canvas.md`.
 
 ## Key contexts
 
@@ -59,7 +61,7 @@ Dialogs (palette, picker) are siblings under Root, not under Workspace.
 Registry constants: `WORKSPACE = "Workspace"`, `CANVAS = "Canvas"` (escape only, as a binding),
 `CANVAS_NOT_TYPING = "Canvas && !Input && !NumberInput && !JumpMode"`,
 `CANVAS_JUMPING = "Canvas JumpMode"`, `QUERY_NODE = "QueryNode"`,
-`RESULT_NODE = "ResultNode"`.
+`RESULT_NODE = "ResultNode"`, `AGENT_NODE = "AgentNode"`.
 
 The `_NOT_TYPING` suffix marks the ones that are *predicates* rather than contexts, and the
 distinction is load-bearing: `key_context` and the chrome's `tooltip_with_action` both parse
@@ -91,6 +93,14 @@ palette does not offer "Run query" on a canvas with no database behind it.
 The card is deliberately not focusable itself; the editor owns the focus handle. Single-letter tool keys will use the
 `!Input` form so typing is never hijacked; gpui-kit's own `cmd-a`/`cmd-z` bindings on `Input`
 sit deeper and win while an editor is focused.
+
+`AGENT_NODE` works the same way, for the same reason: `Agent::CycleMode` (`shift-tab`) and
+`Agent::Stop` are pressed *while the composer holds focus*. `shift-tab` is the one binding here
+that depends on something subtle — gpui-base binds it to `OutdentInline` in the deeper `Input`
+context, and it only reaches the node because `apply_indent` calls `cx.propagate()` for a layout
+mode that cannot be indented. `Agent::Fork` is the opposite: it needs the camera, so it is
+handled on the canvas, and the node's own header button selects its node before dispatching so
+all three surfaces run one path.
 
 `WorkspaceView::new` focuses the canvas; the canvas element is `.id("canvas").test_support()
 .track_focus(&focus_handle).key_context("Canvas")`.

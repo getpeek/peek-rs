@@ -23,6 +23,7 @@ use crate::Launch;
 use crate::autosave::Autosave;
 use crate::canvas::CanvasView;
 use crate::commands::{self, COMMANDS, actions};
+use crate::mcp::McpBridge;
 use crate::title_bar::PeekTitleBar;
 use crate::title_bar::connection::{self, Choice, ConnectionPicker};
 use crate::title_bar::pages::PageTabs;
@@ -52,6 +53,9 @@ pub struct WorkspaceView {
     _database: Subscription,
     /// Only present when this run may write; its absence is what makes read-only safe.
     autosave: Option<Entity<Autosave>>,
+    /// The MCP server an agent drives the canvas through. `None` unless `ai.mcp.enable` is set,
+    /// and `None` in tests, which build the workspace without a config.
+    mcp: Option<McpBridge>,
 }
 
 impl std::fmt::Debug for WorkspaceView {
@@ -89,6 +93,14 @@ impl WorkspaceView {
             launch.persistence,
             cx,
         );
+        // Opt-in, and only at startup: the reference says as much in its own settings, and a
+        // server that appears mid-session would not be forwarded to an already-running agent.
+        if view.config.ai.mcp.enable {
+            view.mcp = McpBridge::start(&view.canvas, view.config.ai.mcp.port, window, cx);
+            if let Some(bridge) = &view.mcp {
+                crate::node::agent::backend::Agents::set_mcp_url(bridge.url(), cx);
+            }
+        }
         view
     }
 
@@ -139,6 +151,7 @@ impl WorkspaceView {
             ui_visible: true,
             _database: cx.observe_global::<Database>(|_, cx| cx.notify()),
             autosave: None,
+            mcp: None,
         }
     }
 
@@ -224,6 +237,33 @@ impl WorkspaceView {
 
     pub fn document(&self, cx: &App) -> Entity<Document> {
         self.canvas.read(cx).document().clone()
+    }
+
+    /// Runs one canvas tool call against this workspace and returns the agent's reply.
+    ///
+    /// The in-process seam onto the same surface the MCP bridge serves, so an agent node running
+    /// a local model reaches the tools without a socket — and so a test can drive all twenty-one
+    /// without starting a server.
+    pub fn run_tool(
+        &self,
+        method: &str,
+        params: &serde_json::Value,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> serde_json::Value {
+        let call = peek_canvas::tools::ToolCall { method, params };
+        self.canvas
+            .update(cx, |canvas, cx| canvas.run_tool(call, window, cx))
+    }
+
+    /// The view behind an agent node, for tests.
+    #[cfg(test)]
+    pub(crate) fn agent_view(
+        &self,
+        node: &peek_document::NodeId,
+        cx: &App,
+    ) -> Option<Entity<crate::node::agent::AgentView>> {
+        self.canvas.read(cx).agent_view(node, cx)
     }
 
     /// The table behind a result node, for tests.

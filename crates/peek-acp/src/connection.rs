@@ -86,7 +86,10 @@ impl AcpConnection {
     ///
     /// # Errors
     /// Returns an error if the subprocess can't be launched or `initialize` fails.
-    pub async fn spawn(config: AcpSpawnConfig, host: Arc<dyn AcpHost>) -> anyhow::Result<Self> {
+    pub(crate) async fn spawn(
+        config: AcpSpawnConfig,
+        host: Arc<dyn AcpHost>,
+    ) -> anyhow::Result<Self> {
         let transport = build_transport(&config.command, config.args, config.env);
 
         let (command_tx, command_rx) = mpsc::unbounded_channel::<Command>();

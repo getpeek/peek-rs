@@ -2,6 +2,7 @@
 //! Sizes are rem-based so the canvas' rem scope scales them with the zoom; borders stay one
 //! physical pixel by design. Colours come from the Peek theme, never from literals.
 
+pub(crate) mod agent;
 pub(crate) mod barchart;
 pub(crate) mod draw;
 pub(crate) mod kind;
@@ -44,11 +45,11 @@ pub(crate) struct NodeShell {
 }
 
 impl NodeShell {
-    pub(crate) fn new(node: &Node, selected: bool, body: AnyElement) -> Self {
+    pub(crate) fn new(node: &Node, selected: bool, body: AnyElement, cx: &App) -> Self {
         Self {
             id: SharedString::from(node.id.to_string()),
             node_type: node.node_type(),
-            title: kind::title(node).into(),
+            title: kind::title(node, cx).into(),
             header_extras: None,
             body,
             selected,

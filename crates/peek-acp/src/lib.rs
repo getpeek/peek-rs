@@ -19,12 +19,11 @@ mod shell_path;
 mod transcript;
 mod update;
 
-pub use config::AcpSpawnConfig;
+pub use config::AgentLaunch;
 pub use connection::{AcpConnection, SessionInfo};
 pub use events::{AgentEvent, AgentEvents, PermissionId, PermissionOption, PermissionRequest};
 pub use host::AcpHost;
 pub use peek_document::{AgentMessage, PlanEntry};
 pub use session::{AcpError, AgentSession, Pending};
-pub use shell_path::spawn_config;
 pub use transcript::{Change, Preview, Transcript};
 pub use update::{AcpUpdate, ToolCallUpdate};

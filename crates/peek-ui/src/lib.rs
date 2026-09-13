@@ -12,6 +12,7 @@ mod canvas;
 pub mod commands;
 mod database;
 mod execution;
+mod mcp;
 mod node;
 mod theme_picker;
 mod title_bar;
@@ -55,6 +56,7 @@ pub fn init(config: &PeekConfig, cx: &mut gpui_kit::App) {
     register_sql_grammar();
     node::query::language::SqlLanguage::init(cx);
     database::Database::init(cx);
+    node::agent::backend::Agents::init(config, cx);
     peek_theme::ThemeService::init(config.theme, cx);
     commands::keymap::bind(&config.keymap, cx);
     cx.on_action(|_: &commands::actions::app::Quit, cx| cx.quit());

@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-09-12.
+Last updated: 2026-09-13.
 
 ## Milestones
 
@@ -11,11 +11,12 @@ Last updated: 2026-09-12.
 | M3 | Themes: six Peek themes, gpui-component projection, picker with live preview | Done (syntax colours, picker swatches, dock icon deferred) |
 | M4 | First real nodes, document mutations, undo, autosave; flip persistence to read-write | Done for seven kinds (Text, Variable, Draw, BarChart, TableDefinition, QueryError and now Query) plus the foundation: mutation API, per-page undo, debounced autosave, `--write` flag, per-kind body seam |
 | M5 | peek-db: connections, SSH tunnels, results sidecar, schema, import | Done except import |
-| M6 | peek-mcp bridge over the mutation API, peek-acp agent node | Not started |
+| M6 | peek-mcp bridge over the mutation API, peek-acp agent node, local Ollama backend | Done |
 | M7 | peek-multiplayer with an event-sink trait replacing Tauri's `AppHandle` | Not started |
 
-Canvas features that slot in between milestones and are not started: regions and wayfinding,
-minimap, page search, page tabs in the title bar.
+Canvas features that slot in between milestones and are not started: regions and wayfinding
+(the model and its mutations landed with M6's tools, but nothing draws them yet), minimap,
+page search, page tabs in the title bar.
 
 ### M5, in pieces
 
@@ -244,12 +245,57 @@ with the node it explains, and `deferred` inherits the content mask in force whe
 — which for a node body is `overflow_hidden`, so it would be clipped by the very table it is
 explaining. The Variable node reached the same conclusion and expands its list editor inline.
 
-Still to come: **follow-references** (clicking a reference chip runs
-`SELECT … WHERE col = 'v' LIMIT 300` and fans new result nodes), which needs the multi-statement
-fan-out `executeQueries` has and `execution::run` does not — it runs one statement from a query
-node. Then per-character match highlighting (matched *cells* are tinted; the reference also
-underlines the matched characters), the dashed ghost hover preview, inline editing, row deletion,
-export, the context menus, pivot and chart sync. Keyboard cell navigation is absent in the
+**Editing and deleting rows.** Double-clicking a short value opens an editor in the cell; Enter
+commits, escape cancels. A JSON object or anything past 36 characters opens in the value pane
+instead, which is the only place either fits. A commit resolves the editable table and its
+primary keys, builds `UPDATE "t" SET "c" = <lit> WHERE "pk" = <lit>`, runs it, and then **re-runs
+the query node behind the result** rather than re-issuing the SQL by hand — that re-resolves the
+variables, re-places the rows and clears any error through the one path. A failure leaves the
+editor open with the reason in a strip under the toolbar; the reference floats that under the
+cell, which a clipped, virtualised table has nowhere to do.
+
+Deleting is the same machinery over a row selection, behind a confirm dialog that says it cannot
+be undone. The affordance only appears when rows are selected **and** the result is writable, so
+the one irreversible action in the table never sits there inviting a stray click.
+
+**None of this is undoable.** These statements change the database, not the document, so the
+canvas history never sees them. That is why every refusal — not a single-table `SELECT`, no
+primary key, a result that does not show the key columns — is a named `NotEditable` checked
+*before* anything is sent, and why the statement is pinned to one row by construction. The
+unbounded-write gate has nothing to say about it: it only flags `TRUNCATE` and a `DELETE` with no
+`WHERE`, and neither can be built from here.
+
+A cell's handlers run inside a `TableState` update, so opening the editor is deferred with
+`window.defer`: reading that state back from there is a re-entrant borrow, which gpui turns into
+a non-unwinding panic that aborts the process. See `docs/canvas.md`, "Editable nodes".
+
+Verified against a real database in a `CREATE TEMP TABLE`, which lives on the connection and
+disappears with it: an update changes exactly one row and leaves its neighbour alone, a delete
+removes only the row it names, and a value containing `o'brien; drop table x` is stored verbatim
+rather than executed.
+
+**Following a reference.** A cell whose column really points somewhere — or is really pointed at
+— is a link: pressing it claims the press so the table does not also start a selection, and
+clicking it asks the database for the rows on the other side and fans them onto the canvas beside
+the result they came from, with an edge saying where they came from. Inbound wins over outbound,
+because on a primary key "what points at this row" is the useful question.
+
+Only a **schema-backed** reference is a link. A `*_id` column with nothing behind it is tinted,
+because the name says what it is, but inert: there is no target to follow, only a name that looks
+like one. The reference behaves the same way — without the schema its chip gets no click handler.
+
+This needed `execution::run_queries`, the multi-statement fan-out `executeQueries` has and the
+single-statement `run` did not: one query per foreign key, each placed and each failing on its
+own. Two fixes to the reference's query, which interpolates
+`` `... WHERE ${ref.column} = '${value}'` `` directly: identifiers go through
+`Engine::quote_identifier`, so a table called `order` parses, and the value goes through the
+literal formatter, so a key holding an apostrophe cannot end the literal early.
+
+Still to come: per-character match highlighting (matched *cells* are tinted; the reference also
+underlines the matched characters), the dashed ghost hover preview, export, the context menus,
+pivot and chart sync. The editors are single-line fields for now: the reference gives booleans a
+three-state picker and long text a growing textarea, and `@variable` autocompletion inside a cell
+is not ported. Keyboard cell navigation is absent in the
 reference too, and went out with `DataTable`'s own selection; it is worth adding back on our
 model.
 
@@ -277,35 +323,53 @@ and so wait for M5.
 
 ### The draw tool
 
-The Draw node renders; the tool that creates one does not, and `Tool::Draw` is unregistered.
-The reducer work is specified — read from `useDrawTool.ts` rather than inferred:
+Done. `Tool::Draw` is registered on `d`, so the toolbar's pencil lights up with its badge and
+the palette lists it — `canvas/toolbar.rs` derives both from the registry and needed no edit.
 
-- Arm with the existing `Input::ArmTool(Some(NodeType::Draw))`, but branch to a new
-  `Interaction::Drawing { samples: Vec<Point> }` rather than `Placing`. **Draw mode is sticky**:
-  `useDrawTool` never clears place mode, so a committed stroke leaves the tool armed for the
-  next one until escape. Place tools are one-shot; this is the opposite.
-- Samples are stored in **world** space, converted on arrival. The reference keeps client
-  coordinates and converts the batch at commit, which is only equivalent because its camera
-  cannot move mid-stroke; converting on arrival keeps the camera off the commit path and stops
-  a wheel-pan mid-stroke from shearing the drawing.
-- No new `Input` variants, and **no `pressure` field**: gpui's `MouseMoveEvent` does not carry
-  one (`MousePressureEvent` is the force-click stream, not stylus pressure), and the reference
-  records `e.pressure || 0.5` — a constant `0.5` for every mouse stroke. Peek renders with
-  `simulate_pressure`, deriving width from sample spacing, so a constant is faithful.
-- While drawing: `Down` on `Button::Left` only and **ignoring `on_node`** — that is the
-  analogue of the reference's `stopPropagation`, so a press over a node starts a stroke rather
-  than selecting or dragging it. `Move` pushes every sample with no drag threshold. `Up`
-  commits when there are at least two samples, then clears them and stays armed.
-- One new `Effect::PlaceDrawing { points: Vec<Point> }`, applied through a
-  `Document::create_drawing(&[Point])` so the node, its data and its undo entry are one
-  mutation. Geometry: `PADDING = stroke_width * 2 = 8` world units, `position = min - 8`,
-  `size = extent + 16`, `points[i] = [w - min + 8, 0.5]`, `stroke_width = 4.0`.
-- **Colour is a trap.** `NodeKind::empty(NodeType::Draw)` yields `"white"`, which is
-  `makeNode`'s palette default; `useDrawTool` overrides it to `"var(--pk-fg)"`. The commit must
-  set it explicitly or every drawn stroke is white in every theme.
+The reducer branch is `Interaction::Drawing { samples }`, and `gesture::on_drawing` is offered
+every input before the ordinary paths. That is what the reference's `stopPropagation` buys: no
+press reaches pan, marquee, drag or resize, so a stroke started over a node draws rather than
+moving it. Wheel and pinch are handed back, so two-finger scroll and pinch zoom keep working
+while the pen is armed. **Draw mode is sticky** — `useDrawTool` never clears place mode, so a
+committed stroke leaves the tool armed until escape, the opposite of every other place tool.
 
-Window-level listeners already give the pointer capture the reference gets from
-`setPointerCapture`.
+Three deltas from the reference, all in `docs/canvas.md`, "The draw tool":
+
+- **Samples are world units, converted on arrival**, so a pan mid-stroke moves the ink with the
+  canvas instead of shearing it. The reference can only convert the batch at commit because its
+  camera cannot move during a stroke.
+- **No `pressure` field.** gpui's `MouseMoveEvent` carries none (`MousePressureEvent` is the
+  force-click stream, not stylus pressure), and the reference records `e.pressure || 0.5` — a
+  constant for every mouse stroke. `simulate_pressure` derives width from sample spacing, so
+  the stored `0.5` is never read back.
+- **A non-left press does nothing.** The reference returns before its `stopPropagation`, so
+  React Flow's `panOnDrag={[1, 2]}` still pans mid-mode; matching that would mean teaching
+  `Panning` to return to `Drawing` on release. The loss is middle-drag, right-drag and
+  space-drag until escape.
+
+One addition the reference has no analogue for: **a sample identical to the one before it is
+dropped**, which `getStrokePoints` does anyway. It is also what keeps a stationary click from
+committing a degenerate one-point dot, since a synthetic pointer stream can emit a move that a
+real stationary click never would.
+
+`Document::create_drawing` is the commit, in one `transaction` so the node and its data are a
+single undo step — undoing a stroke never leaves an empty drawing behind. Geometry is the
+reference's: the samples' extent inset by `PADDING = stroke_width * 2 = 8`, points relative to
+the origin, `stroke_width = 4`. **Colour was the trap**, and it is set explicitly:
+`NodeKind::empty(NodeType::Draw)` yields `makeNode`'s palette default of `"white"`, which would
+be invisible in a light theme.
+
+The live preview is `LiveStroke.tsx`: pane-relative screen points painted above the nodes at
+`stroke_width * 4 * zoom`, through the same `node::draw::tessellate` the committed node uses,
+so the shape cannot change at the moment the pen lifts. It reads `peek_canvas`'s exported
+`DRAW_COLOR` and `DRAW_STROKE_WIDTH`, so preview and commit cannot drift. `CanvasView::reduce`
+returns early when a gesture produces no effects, which is the whole of a stroke until the pen
+lifts — so a non-empty `stroke_world()` now earns its own repaint.
+
+Covered by four reducer tests, two on `create_drawing`, and three `#[gpui_kit::test]`s in
+`crates/peek-ui/tests/draw.rs` driving real pointer dispatch: the padded geometry, stickiness
+across two strokes and escape, and a stroke drawn across a node's header leaving it in place.
+Nothing in that harness reads pixels, so **the preview itself is a feel-test item** below.
 
 ## Chrome
 
@@ -358,7 +422,7 @@ bump the revision, so they never schedule a write.
 ```
 cargo run -- --workspace <name> --connection <name>   # defaults to the first workspace/connection in settings.json
 cargo run -- --write                                  # enables autosave; read-only otherwise
-cargo test --workspace                                # 455 tests, a few seconds after the first build
+cargo test --workspace                                # 676 tests, a few seconds after the first build
 cargo test -p peek-config -p peek-document -p peek-canvas   # the gpui-free crates, seconds
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
@@ -383,6 +447,9 @@ sources. Nothing in that harness reads rendered pixels, so these are open until 
   to move the popover.
 - **Draw at several zoom levels.** Its stroke recovers the zoom factor itself rather than through
   the rem scope, and that path is only unit-asserted — never driven through a real zoomed frame.
+  The live preview compensates for zoom the other way round, by hand, so the two have to agree:
+  the ink under the pen and the stroke left behind should be the same weight and in the same
+  place at 0.4 and at 2.5.
 - **Text's font size.** It is the node's height × 0.62, so a default 280 × 140 node renders at
   86 px and a 300 × 200 one at 124 px. Faithful to the reference, and startling until seen.
 - **Variable at its 220-unit minimum width**: whether the 40 % name column leaves the value
@@ -393,8 +460,27 @@ sources. Nothing in that harness reads rendered pixels, so these are open until 
 
 ## Known gaps and quirks
 
-- Three kinds still show the placeholder body: `ResultInsertForm`, Agent and Activity, each
-  waiting on peek-acp/peek-mcp (M6).
+- Two kinds still show the placeholder body: `ResultInsertForm` and Activity.
+- **The agent node talks to a real agent.** `a` or the toolbar places one; it streams an ACP
+  session (Claude Code by default) or a local Ollama model, renders thoughts, plans, tool
+  disclosures and permission prompts, and forks a conversation into a sibling node. A turn
+  commits to the document as one undo step.
+- **An agent can drive the canvas.** With `ai.mcp.enable` set, `peek-mcp` serves the 21 canvas
+  tools on `127.0.0.1:<port>` and the drain answers each one against the live document. Verified
+  end to end over HTTP: `get_db_schema` returns the connection's real DDL, `create_text_node`
+  places a node, and an unknown id comes back as the reference's own error string.
+- **Regions have a mutation API but no renderer.** `group_nodes`, `add_to_region` and
+  `remove_region` write real regions with exclusive membership and undo; nothing draws them yet,
+  so an agent that groups nodes leaves no visible trace. That is milestone order, not a bug.
+- **The ACP session opens on the first prompt, not on mount.** The reference opens eagerly so the
+  mode pill and the MCP warning are ready before the first question; here the pill appears after
+  the first turn. Opening four sessions when a document loads seemed the worse trade.
+- **No end-to-end test drives MCP over HTTP.** The two halves are covered — `peek-mcp`'s channel
+  round-trip, and `CanvasView::run_tool` for all 21 tools — but nothing exercises the socket
+  between them in CI. The manual probe above is the only check.
+- **`contextKey` is not the reference's sha1.** It is an opaque dedupe token nothing compares
+  across documents, so a transcript written here and reopened in the TypeScript app may insert
+  one extra context message.
 - **The Query node runs**, and its result shows its rows. `Query::Run` (`meta-enter`) executes
   against the connection opened at startup, places the result or a `query-error` node, and polls
   when live is on.
@@ -403,6 +489,17 @@ sources. Nothing in that harness reads rendered pixels, so these are open until 
   so completions offer tables and columns and `diagnose` flags unknown ones. Before a connection
   answers it is empty, which is deliberate: the reference returns nothing rather than painting
   every table red while the schema loads.
+- **Completions are filtered and ranked in `peek-lsp`, not by the menu.** Monaco did that job in
+  the reference — the Rust crate there returns an unfiltered candidate set on purpose — and
+  gpui-component's completion menu renders the provider's array verbatim, so `completion::ranking`
+  does it now: drop what the typed prefix cannot mean, order by match class then kind then length,
+  and set `filter_text` so the menu's highlight covers characters that actually matched. A `@`
+  under the cursor answers with the node's canvas variables instead, which is the reference's
+  second Monaco provider. Three limits remain, all in vendored gpui-component:
+  `CompletionMenuItem::render` builds one `0..filter_text.len()` highlight run, so a match that
+  does not start the label gets no highlight at all; there are no per-kind icons or colours (the
+  reference's Tabler glyphs in `editor.css`); and `MAX_MENU_HEIGHT` is a hard-coded `px(240.)`,
+  so the popover shows fewer rows as the camera zooms in even though its width now scales with it.
 - **Clicking into a query editor puts the caret at the end of the text, not where you clicked.**
   The earlier diagnosis here — that the canvas's window-level listeners swallow the press — is
   **wrong**, and the Result node disproved it: the canvas does not `stop_propagation`, so node

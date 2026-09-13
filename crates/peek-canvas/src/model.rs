@@ -161,13 +161,13 @@ impl Document {
         self.revision
     }
 
-    fn touch(&mut self) {
+    pub(crate) fn touch(&mut self) {
         self.revision += 1;
     }
 
     /// Opens or extends an undo transaction. The single site that reads the clock, so
     /// [`History`]'s own tests can drive it with synthetic instants.
-    fn begin(&mut self, kind: EditKind) {
+    pub(crate) fn begin(&mut self, kind: EditKind) {
         if self.in_transaction {
             return;
         }
@@ -240,7 +240,7 @@ impl Document {
             .expect("active page exists after normalize")
     }
 
-    fn active_page_mut(&mut self) -> &mut Page {
+    pub(crate) fn active_page_mut(&mut self) -> &mut Page {
         let id = self.persisted.active_page_id.clone();
         self.persisted
             .pages
@@ -454,10 +454,33 @@ impl Document {
         }
     }
 
-    /// Position and size together, for placement drags and resize handles anchored on a top or
-    /// left edge, where the origin moves with the size.
+    /// Position and size together, for resize handles anchored on a top or left edge, where
+    /// the origin moves with the size.
     pub fn set_bounds(&mut self, id: &NodeId, bounds: Rect) {
         self.begin(EditKind::Resize(id.clone()));
+        self.write_bounds(id, bounds);
+    }
+
+    /// The live bounds of the node a placement drag is sizing.
+    ///
+    /// It opens no transaction of its own, so the `Structure` one [`Document::create_node`]
+    /// opened on the drag's first frame stays open until the release checkpoints it: one undo
+    /// removes the node, rather than one per size it passed through.
+    pub fn resize_placement(&mut self, id: &NodeId, bounds: Rect) {
+        self.write_bounds(id, bounds);
+    }
+
+    /// Drops the node a cancelled placement drag created, along with the undo transaction its
+    /// creation opened: escaping mid-drag leaves the page as it was, with nothing to undo.
+    pub fn cancel_placement(&mut self, id: &NodeId) {
+        if self.active_page_mut().remove_node(id) {
+            self.prune_selection();
+            self.touch();
+        }
+        self.history.discard();
+    }
+
+    fn write_bounds(&mut self, id: &NodeId, bounds: Rect) {
         if let Some(node) = self.node_mut(id) {
             let min = node.node_type().map_or(bounds.size, NodeType::min_size);
             node.position = bounds.origin;
@@ -470,8 +493,18 @@ impl Document {
 
     /// Runs `work` as a single undo step, whatever mutations it calls inside.
     ///
+    /// The seam a canvas tool call commits through: one call is one user-visible action, so
+    /// create + set data + connect have to undo in one press. `EditKind::Structure` never
+    /// coalesces, so two tool calls are always two steps and neither can fold into the user's
+    /// own typing burst.
+    pub fn transaction<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> T {
+        self.transaction_of(EditKind::Structure, work)
+    }
+
+    /// Runs `work` as a single undo step, whatever mutations it calls inside.
+    ///
     /// Re-entrant: a nested call joins the transaction already open rather than starting one.
-    pub(crate) fn transaction<T>(
+    pub(crate) fn transaction_of<T>(
         &mut self,
         kind: EditKind,
         work: impl FnOnce(&mut Self) -> T,
@@ -538,7 +571,7 @@ impl Document {
             .iter()
             .map(|sample| [sample.x - origin.x, sample.y - origin.y, DRAW_PRESSURE])
             .collect();
-        Some(self.transaction(EditKind::Structure, |document| {
+        Some(self.transaction_of(EditKind::Structure, |document| {
             let id = document.create_node(NodeType::Draw, bounds);
             document.update_data::<DrawData>(&id, |data| {
                 data.points = points;
@@ -641,16 +674,50 @@ impl Document {
 
     // ---- page mutations ----------------------------------------------------------------
 
-    /// Appends a page named "Page {n}" unless a name is given, and makes it active.
-    pub fn add_page(&mut self, name: Option<String>) -> PageId {
+    /// Adds a page named "Page {n}" unless a name is given, and makes it active. `order` is its
+    /// zero-based slot in the page list, clamped to the current count; `None` appends.
+    pub fn add_page(&mut self, name: Option<String>, order: Option<usize>) -> PageId {
         self.checkpoint();
         let name = name.unwrap_or_else(|| format!("Page {}", self.page_count() + 1));
         let page = Page::new(name);
         let id = page.id.clone();
-        self.persisted.insert_page(page);
+        match order {
+            Some(order) => self.persisted.insert_page_at(page, order),
+            None => self.persisted.insert_page(page),
+        }
         self.clear_selection();
         self.touch();
         id
+    }
+
+    /// The page a node lives on, wherever it is. The active-page accessors cannot answer this,
+    /// and a tool may name a node the user is not looking at.
+    #[must_use]
+    pub fn page_of(&self, node: &NodeId) -> Option<&PageId> {
+        self.persisted
+            .pages
+            .iter()
+            .find(|(_, page)| page.nodes.iter().any(|candidate| &candidate.id == node))
+            .map(|(id, _)| id)
+    }
+
+    /// Runs `work` with `page` temporarily active, then puts the active page back — how a tool
+    /// edits a node on a page the user is not looking at without yanking the view to it.
+    ///
+    /// A lens, not a page switch: no selection clear, no revision bump, no checkpoint. An edit
+    /// inside is recorded against `page`, so a transaction must be opened *inside* this, never
+    /// around it. `None` when the page does not exist.
+    ///
+    /// Deleting inside the scope would prune the selection against the wrong page; nothing does
+    /// today, and a caller that wants to should switch pages properly instead.
+    pub fn on_page<T>(&mut self, page: &PageId, work: impl FnOnce(&mut Self) -> T) -> Option<T> {
+        if !self.persisted.pages.contains_key(page) {
+            return None;
+        }
+        let restore = std::mem::replace(&mut self.persisted.active_page_id, page.clone());
+        let outcome = work(self);
+        self.persisted.active_page_id = restore;
+        Some(outcome)
     }
 
     pub fn rename_page(&mut self, id: &PageId, name: String) -> bool {
@@ -711,6 +778,7 @@ impl Document {
             selected_edges: self.edge_selection.len(),
             selected_queries: kind_count(NodeType::Query),
             selected_results: kind_count(NodeType::Result),
+            selected_agents: kind_count(NodeType::Agent),
             pages: self.page_count(),
             history: HistoryScope {
                 can_undo: self.history.can_undo(self.active_page_id()),
@@ -1141,7 +1209,7 @@ mod tests {
         let mut document = document();
         assert_eq!(document.page_count(), 2);
 
-        let id = document.add_page(None);
+        let id = document.add_page(None, None);
 
         assert_eq!(document.active_page_id(), &id);
         assert_eq!(document.active_page().name, "Page 3");
@@ -1305,5 +1373,87 @@ mod tests {
     #[test]
     fn a_result_node_without_rows_reads_as_none() {
         assert_eq!(document().result(&NodeId::from("never-run-result-0")), None);
+    }
+
+    #[test]
+    fn a_node_is_found_on_whichever_page_holds_it() {
+        let mut document = document();
+        let second = document.neighbour_page(1).cloned().unwrap();
+        let active = document.active_page_id().clone();
+
+        assert_eq!(document.page_of(&NodeId::from("q1")), Some(&active));
+        assert_eq!(document.page_of(&NodeId::from("nope")), None);
+
+        document.on_page(&second, |document| {
+            document.create_node(
+                NodeType::Text,
+                Rect::new(Point::new(0.0, 0.0), Size::new(100.0, 50.0)),
+            )
+        });
+        let placed = document
+            .on_page(&second, |document| document.nodes()[0].id.clone())
+            .unwrap();
+        assert_eq!(document.page_of(&placed), Some(&second));
+    }
+
+    /// The whole point of the lens: a tool may edit a node the user is not looking at, and the
+    /// view must not jump to it.
+    #[test]
+    fn the_lens_puts_the_active_page_back() {
+        let mut document = document();
+        let second = document.neighbour_page(1).cloned().unwrap();
+        let before = document.active_page_id().clone();
+
+        let seen = document
+            .on_page(&second, |document| document.active_page_id().clone())
+            .unwrap();
+
+        assert_eq!(seen, second, "work runs with the page active");
+        assert_eq!(document.active_page_id(), &before, "and it is put back");
+    }
+
+    #[test]
+    fn the_lens_refuses_a_page_that_is_not_there() {
+        let mut document = document();
+        assert!(
+            document
+                .on_page(&PageId::from("page_nope"), |_| ())
+                .is_none()
+        );
+    }
+
+    /// A transaction opened inside the lens is recorded against the page it targeted, and undo
+    /// stacks are per-page — so the edit is undoable *there*, and the page the user is looking
+    /// at keeps its own history. A tool editing a background node must not eat the user's undo.
+    #[test]
+    fn an_edit_through_the_lens_undoes_on_its_own_page() {
+        let mut document = document();
+        let second = document.neighbour_page(1).cloned().unwrap();
+
+        document.on_page(&second, |document| {
+            document.transaction(|document| {
+                document.create_node(
+                    NodeType::Text,
+                    Rect::new(Point::new(0.0, 0.0), Size::new(100.0, 50.0)),
+                );
+            });
+            document.checkpoint();
+        });
+
+        assert!(!document.undo(), "the active page has nothing to undo");
+
+        assert!(document.switch_page(&second));
+        assert_eq!(document.nodes().len(), 1);
+        assert!(document.undo());
+        assert!(document.nodes().is_empty());
+    }
+
+    #[test]
+    fn a_page_can_be_added_at_a_chosen_order() {
+        let mut document = document();
+        let first = document.add_page(Some("wedged".to_string()), Some(0));
+
+        assert_eq!(document.pages().next().map(|page| &page.id), Some(&first));
+        assert_eq!(document.active_page_id(), &first);
     }
 }

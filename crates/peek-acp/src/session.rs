@@ -18,7 +18,7 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
-use crate::config::AcpSpawnConfig;
+use crate::config::AgentLaunch;
 use crate::connection::{AcpConnection, SessionInfo};
 use crate::events::{AgentEvent, AgentEvents, PermissionId, PermissionRequest};
 use crate::host::AcpHost;
@@ -96,9 +96,13 @@ impl AgentSession {
     ///
     /// `mcp_http_servers` is `(name, url)` pairs the agent should connect to — how Peek's
     /// own MCP server reaches it, and thus how the agent drives the canvas.
+    ///
+    /// Resolving `launch.command` against the login shell's `PATH` happens here, on the
+    /// runtime, because it shells out and gpui's executor has no reactor to drive that on. It
+    /// is also only paid once: the second session reuses the connection and never probes.
     pub fn open_session(
         &self,
-        spawn: AcpSpawnConfig,
+        launch: AgentLaunch,
         cwd: Option<PathBuf>,
         mcp_http_servers: Vec<(String, String)>,
     ) -> Pending<SessionInfo> {
@@ -109,6 +113,10 @@ impl AgentSession {
                 if let Some(connection) = slot.as_ref() {
                     connection.clone()
                 } else {
+                    let spawn =
+                        crate::shell_path::spawn_config(&launch.command, launch.args, launch.env)
+                            .await
+                            .map_err(AcpError::Spawn)?;
                     let connection = Arc::new(
                         AcpConnection::spawn(spawn, host)
                             .await

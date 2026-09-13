@@ -1454,6 +1454,108 @@ fn pressing_q_then_clicking_places_a_query_node(cx: &mut TestAppContext) {
     assert_eq!(queries, 2, "the tool places a second query node");
 }
 
+/// The drag sizes the node itself rather than a preview rectangle, and the release hands a
+/// query straight to its editor, so typing lands in the SQL without a further click.
+#[gpui_kit::test]
+fn dragging_the_query_tool_sizes_the_node_and_focuses_its_editor(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx, SQL_DOCUMENT);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.press("q", cx);
+        window.drag(point(px(300.0), px(200.0)), point(px(800.0), px(600.0)), cx);
+        window.input("select 1", cx);
+    })
+    .unwrap();
+
+    let placed = cx.update(|cx| {
+        let document = workspace.read(cx).document(cx);
+        let document = document.read(cx);
+        let id = document
+            .selected()
+            .iter()
+            .next()
+            .cloned()
+            .expect("the placed node is selected");
+        document.node(&id).cloned().expect("the placed node exists")
+    });
+    assert_eq!(
+        placed.size(),
+        Size::new(500.0, 400.0),
+        "the viewport is identity, so the dragged pixels are the node's world size"
+    );
+    let peek_document::NodeKind::Query(data) = &placed.kind else {
+        panic!("expected a query node, got {:?}", placed.kind);
+    };
+    assert_eq!(
+        data.query, "select 1",
+        "the editor took focus when the drag ended"
+    );
+}
+
+/// The whole drag is one undo step: the creation and every size it passed through.
+#[gpui_kit::test]
+fn undoing_a_placement_drag_removes_the_node_it_created(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx, ONE_NODE);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.press("t", cx);
+        window.drag(point(px(300.0), px(200.0)), point(px(800.0), px(600.0)), cx);
+        // A node placed empty opens its editor, which owns `cmd-z` while it holds focus.
+        window.press("escape", cx);
+    })
+    .unwrap();
+    assert_eq!(node_count(cx, &workspace), 2);
+
+    cx.update_window(handle.into(), |_, window, cx| window.press("cmd-z", cx))
+        .unwrap();
+    assert_eq!(
+        node_count(cx, &workspace),
+        1,
+        "one undo takes the drag back, not one size at a time"
+    );
+}
+
+/// Escape mid-drag drops the node the drag had already created, leaving nothing to undo.
+#[gpui_kit::test]
+fn escaping_a_placement_drag_drops_the_node_and_leaves_no_undo_step(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx, ONE_NODE);
+
+    cx.update_window(handle.into(), |_, window, cx| window.press("q", cx))
+        .unwrap();
+
+    // Clear of the document's one node, so the press reaches the canvas rather than an editor.
+    let mut visual = VisualTestContext::from_window(handle.into(), cx);
+    visual.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: point(px(700.0), px(450.0)),
+        modifiers: Modifiers::default(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    visual.simulate_event(MouseMoveEvent {
+        position: point(px(1000.0), px(700.0)),
+        pressed_button: Some(MouseButton::Left),
+        modifiers: Modifiers::default(),
+    });
+    assert_eq!(
+        node_count(cx, &workspace),
+        2,
+        "the drag placed a node while the pointer was still down"
+    );
+
+    cx.update_window(handle.into(), |_, window, cx| window.press("escape", cx))
+        .unwrap();
+    assert_eq!(node_count(cx, &workspace), 1);
+
+    cx.update_window(handle.into(), |_, window, cx| window.press("cmd-z", cx))
+        .unwrap();
+    assert_eq!(
+        node_count(cx, &workspace),
+        1,
+        "the cancelled placement left no undo step to bring it back"
+    );
+}
+
 #[gpui_kit::test]
 fn escape_hands_focus_back_so_undo_reaches_the_canvas(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx, SQL_DOCUMENT);

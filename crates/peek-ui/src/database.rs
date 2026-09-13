@@ -22,6 +22,11 @@ pub(crate) struct Database {
     connected: bool,
     /// The last connection error, shown by the connection UI rather than thrown away.
     error: Option<String>,
+    /// The open connection's name, which `get_connection_info` reports. Never its URL.
+    name: Option<String>,
+    /// The introspected schema, kept rather than dropped once the language server has its
+    /// index: `get_db_schema` renders the same tables as DDL for an agent.
+    schema: Arc<peek_db::Schema>,
 }
 
 impl std::fmt::Debug for Database {
@@ -52,6 +57,19 @@ impl Database {
             engine: Engine::Unknown,
             connected: false,
             error: None,
+            name: None,
+            schema: Arc::default(),
+        });
+    }
+
+    /// Marks the session connected without one, so tests can reach the paths that are gated on
+    /// a connection. There is no session behind it: anything that actually runs SQL still does
+    /// nothing, which is what keeps a test from reaching a real database by accident.
+    #[cfg(test)]
+    pub(crate) fn mark_connected_for_test(cx: &mut App) {
+        cx.update_global::<Self, ()>(|database, _| {
+            database.connected = true;
+            database.engine = Engine::Postgres;
         });
     }
 
@@ -71,6 +89,18 @@ impl Database {
 
     pub(crate) fn session(cx: &App) -> Option<Arc<Session>> {
         cx.global::<Self>().session.clone()
+    }
+
+    /// Name and engine of the open connection, as `get_connection_info` reports them.
+    /// Deliberately not the URL: that carries credentials and must never reach an agent.
+    pub(crate) fn connection_info(cx: &App) -> Option<(String, Engine)> {
+        let database = cx.global::<Self>();
+        database.name.clone().map(|name| (name, database.engine))
+    }
+
+    /// The introspected schema, for the DDL an agent reads before writing a query.
+    pub(crate) fn schema(cx: &App) -> Arc<peek_db::Schema> {
+        Arc::clone(&cx.global::<Self>().schema)
     }
 
     /// The last connection error, which the connection picker shows.
@@ -97,8 +127,11 @@ impl Database {
             database.connected = false;
             database.engine = Engine::Unknown;
             database.error = None;
+            database.name = None;
+            database.schema = Arc::default();
         });
 
+        let connection_name = name.clone();
         cx.spawn(async move |cx| {
             let opened = session
                 .connect(url, tunnel, HostKeyPolicy::TrustOnFirstUse)
@@ -113,6 +146,7 @@ impl Database {
                 database.connected = true;
                 database.engine = engine;
                 database.error = None;
+                database.name = Some(connection_name);
             });
             load_schema(&session, cx).await;
         })
@@ -141,6 +175,7 @@ async fn load_schema(session: &Arc<Session>, cx: &mut AsyncApp) {
         Err(_) => return,
     };
     log::info!("peek: schema has {} tables", schema.tables.len());
+    let retained = Arc::new(schema.clone());
     // `SchemaIndex::from_raw` takes the reference's own map shapes, including the inverted
     // `"table.column"` reference keys, so the driver's output goes across unchanged.
     let index = peek_lsp::SchemaIndex::from_raw(
@@ -150,6 +185,7 @@ async fn load_schema(session: &Arc<Session>, cx: &mut AsyncApp) {
     );
     cx.update(|cx| {
         peek_lsp::set_schema(&SqlLanguage::schema(cx), index);
+        cx.update_global::<Database, ()>(|database, _| database.schema = retained);
     });
 }
 

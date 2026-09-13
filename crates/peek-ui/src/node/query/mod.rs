@@ -7,7 +7,7 @@
 mod heading;
 pub(crate) mod language;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gpui_kit::TestSupportExt;
@@ -17,7 +17,7 @@ use gpui_kit::component::{Disableable, Selectable, Sizable, StyledExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable, SharedString, Subscription, Task,
-    Window, div, rems,
+    Window, div, px, rems,
 };
 use peek_canvas::Document;
 use peek_document::{LiveInterval, NodeData, NodeId, QueryData};
@@ -32,6 +32,11 @@ use super::{BASE_REM, RESIZE_FOOTER_CLEARANCE};
 const LIVE_POLL_MS: u64 = 10_000;
 /// `attachLspDocumentSync`'s trailing debounce before re-parsing and re-diagnosing.
 const SYNC_DEBOUNCE_MS: u64 = 30;
+/// How wide the completion popover may grow at zoom 1.
+///
+/// gpui-base defaults to 320 px and its own doc comment says to widen it for long labels;
+/// `users.organisation_id : uuid` is a routine detail line here.
+const COMPLETION_MENU_WIDTH: f32 = 420.0;
 
 pub(crate) struct QueryState {
     editor: Entity<QueryEditor>,
@@ -98,7 +103,10 @@ pub(crate) fn body(
         return div().into_any_element();
     };
     let editor = state.editor.clone();
-    editor.update(cx, |editor, cx| editor.reconcile(data, window, cx));
+    editor.update(cx, |editor, cx| {
+        editor.reconcile_menu_width(context.zoom, cx);
+        editor.reconcile(data, window, cx);
+    });
     editor.into_any_element()
 }
 
@@ -182,7 +190,10 @@ struct QueryEditor {
     /// reference's two-click confirmation, which is component state there too, so editing the
     /// query clears it.
     confirming_unbounded: bool,
-    _subscription: Subscription,
+    /// The zoom the completion popover's width was last computed for. `0.0` so the first frame
+    /// always writes it.
+    menu_zoom: f64,
+    _subscriptions: [Subscription; 2],
 }
 
 impl QueryEditor {
@@ -208,13 +219,27 @@ impl QueryEditor {
                 .default_value(query)
         });
 
-        if let Some(uri) = uri.clone() {
+        // The provider cannot read the menu's open flag off the editor: every provider call
+        // happens inside that entity's own update. Mirror it instead — each path that opens or
+        // closes the menu notifies, so the observer has it settled before the next keystroke.
+        let menu_open = Rc::new(Cell::new(false));
+        if let Some(completions) =
+            language::SqlCompletions::new(node.clone(), Rc::clone(&menu_open), document.downgrade())
+        {
             editor.update(cx, |state, _| {
-                state.lsp_mut().completion_provider = Some(language::SqlCompletions::new(uri));
+                state.lsp_mut().completion_provider = Some(completions);
             });
         }
 
-        let subscription = cx.subscribe_in(&editor, window, Self::on_editor_event);
+        let subscriptions = [
+            cx.subscribe_in(&editor, window, Self::on_editor_event),
+            cx.observe(&editor, {
+                let menu_open = Rc::clone(&menu_open);
+                move |_, editor, cx| {
+                    menu_open.set(editor.read(cx).completion_menu_state().open);
+                }
+            }),
+        ];
         let revision = document.read(cx).revision();
 
         let mut this = Self {
@@ -229,11 +254,33 @@ impl QueryEditor {
             live_task: Task::ready(()),
             live_interval: None,
             confirming_unbounded: false,
-            _subscription: subscription,
+            menu_zoom: 0.0,
+            _subscriptions: subscriptions,
         };
         // The reference syncs once before subscribing, so a node opens with its diagnostics.
         this.schedule_sync(cx);
         this
+    }
+
+    /// Keeps the completion popover's width on the camera.
+    ///
+    /// The popover is a deferred draw, and gpui captures the rem size when the draw is queued —
+    /// so it lays out inside the node's `BASE_REM * zoom` scope and its rows grow with the
+    /// camera, while `max_width` stays in absolute pixels. Scale it by hand or the labels clip
+    /// as you zoom in.
+    fn reconcile_menu_width(&mut self, zoom: f64, cx: &mut App) {
+        if (zoom - self.menu_zoom).abs() < f64::EPSILON {
+            return;
+        }
+        self.menu_zoom = zoom;
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "a popover width in pixels is far inside f32"
+        )]
+        let width = px(COMPLETION_MENU_WIDTH * zoom as f32);
+        self.editor.update(cx, |state, _| {
+            state.lsp_mut().completion_menu.max_width = width;
+        });
     }
 
     fn on_editor_event(
@@ -725,5 +772,172 @@ mod layout_tests {
             visible.end >= 5,
             "all five rows should be laid out, got {visible:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::{COMPLETION_MENU_WIDTH, QueryEditor};
+    use gpui_kit::component::Root;
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{AnyWindowHandle, AppContext, Entity, TestAppContext, px, size};
+    use peek_canvas::Document;
+    use peek_document::{CanvasDocument, NodeId};
+    use std::collections::HashMap;
+
+    /// A variable node feeding the query node the editor under test is bound to.
+    const DOCUMENT: &str = r#"{
+      "version": 1,
+      "activePageId": "page_test0001",
+      "pageOrder": ["page_test0001"],
+      "pages": {
+        "page_test0001": {
+          "id": "page_test0001",
+          "name": "Page 1",
+          "nodes": [
+            {
+              "id": "query_aaaaaaaa",
+              "type": "query",
+              "position": { "x": 600, "y": 100 },
+              "width": 400,
+              "height": 200,
+              "data": { "query": "" }
+            },
+            {
+              "id": "variable_bbbbbbbb",
+              "type": "variable",
+              "position": { "x": 100, "y": 100 },
+              "width": 360,
+              "height": 200,
+              "data": {
+                "rows": [
+                  { "name": "limit", "value": "10" },
+                  { "name": "lookback", "value": "7" },
+                  { "name": "region", "value": "eu" }
+                ]
+              }
+            }
+          ],
+          "edges": [
+            { "id": "variable_bbbbbbbb->query_aaaaaaaa",
+              "source": "variable_bbbbbbbb", "target": "query_aaaaaaaa" }
+          ],
+          "viewport": { "x": 0, "y": 0, "zoom": 1 }
+        }
+      }
+    }"#;
+
+    fn node() -> NodeId {
+        NodeId::from("query_aaaaaaaa")
+    }
+
+    fn open(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<QueryEditor>) {
+        cx.update(|cx| crate::init(&peek_config::PeekConfig::default(), cx));
+
+        let mut editor = None;
+        let handle = cx.open_window(size(px(600.0), px(400.0)), |window, cx| {
+            let document = cx.new(|_| {
+                Document::load(CanvasDocument::from_json(DOCUMENT).expect("fixture parses"))
+            });
+            let view = cx.new(|cx| QueryEditor::new(node(), String::new(), document, window, cx));
+            editor = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        (handle.into(), editor.expect("editor built"))
+    }
+
+    /// `users` and one table the prefix `us` cannot mean.
+    fn seed_schema(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let mut tables = HashMap::new();
+            tables.insert(
+                "users".to_string(),
+                vec![("id".to_string(), "uuid".to_string())],
+            );
+            tables.insert(
+                "organisations".to_string(),
+                vec![("id".to_string(), "uuid".to_string())],
+            );
+            let index = peek_lsp::SchemaIndex::from_raw(tables, HashMap::new(), HashMap::new());
+            peek_lsp::set_schema(&super::language::SqlLanguage::schema(cx), index);
+        });
+    }
+
+    fn menu_labels(cx: &mut TestAppContext, editor: &Entity<QueryEditor>) -> Vec<String> {
+        cx.update(|cx| {
+            editor
+                .read(cx)
+                .editor
+                .read(cx)
+                .completion_menu_state()
+                .items
+                .iter()
+                .map(|item| item.label.clone())
+                .collect()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn the_completion_menu_width_tracks_the_camera_zoom(cx: &mut TestAppContext) {
+        let (_handle, editor) = open(cx);
+
+        cx.update(|cx| editor.update(cx, |this, cx| this.reconcile_menu_width(2.0, cx)));
+
+        let width = cx.update(|cx| {
+            editor
+                .read(cx)
+                .editor
+                .read(cx)
+                .lsp()
+                .completion_menu
+                .max_width
+        });
+        assert_eq!(width, px(COMPLETION_MENU_WIDTH * 2.0));
+    }
+
+    /// The whole path: a keystroke, the provider, `peek_lsp`'s ranking, the menu.
+    ///
+    /// Monaco filtered the candidate set in the reference app and gpui-component does not, so
+    /// without ranking this list is every table in the schema.
+    #[gpui_kit::test]
+    fn typing_a_table_prefix_narrows_the_menu_and_deleting_widens_it(cx: &mut TestAppContext) {
+        let (handle, editor) = open(cx);
+        seed_schema(cx);
+
+        cx.update_window(handle, |_, window, cx| {
+            window.click(format!("{}-editor", node()), cx);
+            window.input("select * from us", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(menu_labels(cx, &editor), ["users"]);
+
+        // Backspacing to `u` has to re-query: `is_completion_trigger` sees an empty edit, and
+        // nothing else on the deletion path refreshes or closes the menu.
+        cx.update_window(handle, |_, window, cx| window.press("backspace", cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            menu_labels(cx, &editor).len() > 1,
+            "the shorter prefix admits more tables"
+        );
+    }
+
+    /// The reference registers a second Monaco provider for `@variables`; here the one provider
+    /// answers for both, and an `@` under the cursor means the canvas's variables rather than
+    /// the schema.
+    #[gpui_kit::test]
+    fn an_at_sign_offers_the_variables_wired_into_the_node(cx: &mut TestAppContext) {
+        let (handle, editor) = open(cx);
+        seed_schema(cx);
+
+        cx.update_window(handle, |_, window, cx| {
+            window.click(format!("{}-editor", node()), cx);
+            window.input("select * from users where id = @l", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(menu_labels(cx, &editor), ["@limit", "@lookback"]);
     }
 }

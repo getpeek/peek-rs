@@ -386,6 +386,24 @@ pub struct VariableRow {
     pub value: VariableValue,
 }
 
+/// Whether a name can actually be substituted into a query.
+///
+/// `VARIABLE_NAME_RE` in `~/labs/peek/src/canvas/variables.ts` is `/^[A-Za-z_][A-Za-z0-9_]*$/u`
+/// and `scanVariableSites` only ever matches that shape, so a name outside it is inert however
+/// valid it looks. The grammar is six characters wide, which is cheaper to spell out than to
+/// pull a regex engine in for.
+#[must_use]
+pub fn is_variable_name(name: &str) -> bool {
+    let mut characters = name.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VariableData {

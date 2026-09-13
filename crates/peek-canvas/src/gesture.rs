@@ -126,7 +126,10 @@ pub enum Interaction {
     Placing {
         node_type: NodeType,
         origin: Option<Point>,
-        current: Option<Point>,
+        /// Whether the drag has passed the threshold and the node it is sizing exists. The id
+        /// stays with the view that minted it: the reducer only needs to know that the next
+        /// move resizes rather than creates.
+        placed: bool,
     },
 }
 
@@ -142,19 +145,6 @@ impl Interaction {
         match self {
             Self::Marquee {
                 origin, current, ..
-            } => Some(Rect::from_corners(*origin, *current)),
-            _ => None,
-        }
-    }
-
-    /// The in-progress placement rectangle in screen space, drawn like the marquee.
-    #[must_use]
-    pub fn placement_screen_rect(&self) -> Option<Rect> {
-        match self {
-            Self::Placing {
-                origin: Some(origin),
-                current: Some(current),
-                ..
             } => Some(Rect::from_corners(*origin, *current)),
             _ => None,
         }
@@ -201,11 +191,18 @@ pub enum Effect {
         id: NodeId,
         bounds: Rect,
     },
-    /// Create a node of this kind with these world bounds, once, on release.
+    /// Create a node of this kind with these world bounds and select it: the first frame of a
+    /// placement drag, or the whole of a placement click.
     PlaceNode {
         node_type: NodeType,
         world: Rect,
     },
+    /// New world bounds for the node the running placement created, once per move.
+    ResizePlacement {
+        world: Rect,
+    },
+    /// The placement is over: seal its undo step, frame the node and hand it focus.
+    CommitPlacement,
     /// Commit one freehand stroke: at least two world-space samples, in the order drawn.
     PlaceDrawing {
         points: Vec<Point>,
@@ -263,7 +260,7 @@ pub fn reduce(
                 Some(node_type) => Interaction::Placing {
                     node_type,
                     origin: None,
-                    current: None,
+                    placed: false,
                 },
                 None => Interaction::Idle,
             };
@@ -328,13 +325,10 @@ fn on_down(
     modifiers: Modifiers,
     on: Option<Hit>,
 ) -> Vec<Effect> {
-    if let Interaction::Placing {
-        origin, current, ..
-    } = state
-    {
+    if let Interaction::Placing { origin, placed, .. } = state {
         if button == Button::Left {
             *origin = Some(screen);
-            *current = Some(screen);
+            *placed = false;
         }
         return Vec::new();
     }
@@ -365,8 +359,11 @@ fn on_move(
     screen: Point,
 ) -> Vec<Effect> {
     match state {
-        // `Drawing` is unreachable: [`reduce`] offers every pointer input to [`on_drawing`] first.
-        Interaction::Idle | Interaction::Drawing { .. } => Vec::new(),
+        // A move before an armed tool's press has landed does nothing, and `Drawing` is
+        // unreachable: [`reduce`] offers every pointer input to [`on_drawing`] first.
+        Interaction::Idle
+        | Interaction::Drawing { .. }
+        | Interaction::Placing { origin: None, .. } => Vec::new(),
         Interaction::PendingPress {
             button,
             origin,
@@ -430,13 +427,25 @@ fn on_move(
                 bounds: corner.resize(*start, delta),
             }]
         }
+        // The node is real from the first frame past the threshold, so the drag sizes the node
+        // itself rather than a preview rectangle (`usePlaceTool.ts`).
         Interaction::Placing {
-            origin, current, ..
+            node_type,
+            origin: Some(origin),
+            placed,
         } => {
-            if origin.is_some() {
-                *current = Some(screen);
+            let world = dragged_world(*node_type, *origin, screen, camera);
+            if *placed {
+                return vec![Effect::ResizePlacement { world }];
             }
-            Vec::new()
+            if origin.distance_to(screen) < DRAG_THRESHOLD {
+                return Vec::new();
+            }
+            *placed = true;
+            vec![Effect::PlaceNode {
+                node_type: *node_type,
+                world,
+            }]
         }
     }
 }
@@ -560,18 +569,24 @@ fn on_up(state: &mut Interaction, camera: Camera, button: Button, _screen: Point
                 (None, false) => vec![Effect::DeselectAll],
             }
         }
+        // A release with a node already placed commits it whatever button arrived: leaving a
+        // half-placed node behind would be worse than committing one the user was sizing.
+        Interaction::Placing { placed: true, .. } => vec![Effect::CommitPlacement],
         Interaction::Placing {
             node_type,
             origin: Some(origin),
-            current,
+            placed: false,
         } => {
             if button != Button::Left {
                 return Vec::new();
             }
-            vec![Effect::PlaceNode {
-                node_type,
-                world: placement_world(node_type, origin, current.unwrap_or(origin), camera),
-            }]
+            vec![
+                Effect::PlaceNode {
+                    node_type,
+                    world: click_world(node_type, origin, camera),
+                },
+                Effect::CommitPlacement,
+            ]
         }
         Interaction::Panning { .. }
         | Interaction::Marquee { .. }
@@ -580,18 +595,19 @@ fn on_up(state: &mut Interaction, camera: Camera, button: Button, _screen: Point
     }
 }
 
-/// A click places a default-size node centred on the cursor; a drag past the threshold places
-/// the dragged rectangle. Both are clamped to the kind's minimum (`usePlaceTool.ts`).
-fn placement_world(node_type: NodeType, origin: Point, current: Point, camera: Camera) -> Rect {
+/// A placement click puts a default-size node centred on the cursor (`usePlaceTool.ts`).
+fn click_world(node_type: NodeType, screen: Point, camera: Camera) -> Rect {
+    let size = node_type.default_size();
+    let centre = camera.screen_to_world(screen);
+    Rect::new(
+        Point::new(centre.x - size.width / 2.0, centre.y - size.height / 2.0),
+        size,
+    )
+}
+
+/// The rectangle a placement drag has covered so far, clamped to the kind's minimum.
+fn dragged_world(node_type: NodeType, origin: Point, current: Point, camera: Camera) -> Rect {
     let minimum = node_type.min_size();
-    if origin.distance_to(current) < DRAG_THRESHOLD {
-        let size = node_type.default_size();
-        let centre = camera.screen_to_world(origin);
-        return Rect::new(
-            Point::new(centre.x - size.width / 2.0, centre.y - size.height / 2.0),
-            size,
-        );
-    }
     let dragged = Rect::from_corners(
         camera.screen_to_world(origin),
         camera.screen_to_world(current),
@@ -1374,13 +1390,16 @@ mod tests {
         // Zoom 2.0, pan 0: screen (100, 100) is world (50, 50).
         assert_eq!(
             effects,
-            vec![Effect::PlaceNode {
-                node_type: NodeType::Text,
-                world: Rect::new(
-                    Point::new(50.0 - size.width / 2.0, 50.0 - size.height / 2.0),
-                    size,
-                ),
-            }]
+            vec![
+                Effect::PlaceNode {
+                    node_type: NodeType::Text,
+                    world: Rect::new(
+                        Point::new(50.0 - size.width / 2.0, 50.0 - size.height / 2.0),
+                        size,
+                    ),
+                },
+                Effect::CommitPlacement,
+            ]
         );
     }
 
@@ -1409,7 +1428,7 @@ mod tests {
             ],
         );
 
-        let Some(Effect::PlaceNode { world, .. }) = effects.last() else {
+        let Some(Effect::PlaceNode { world, .. }) = effects.first() else {
             panic!("expected a placement, got {effects:?}");
         };
         assert_eq!(
@@ -1417,6 +1436,57 @@ mod tests {
             Size::new(300.0, NodeType::Text.min_size().height),
             "600 screen px at zoom 2, and 20 world units clamped up to the minimum"
         );
+        assert_eq!(effects.last(), Some(&Effect::CommitPlacement));
+    }
+
+    /// The point of placing on the first move rather than on the release: the node exists while
+    /// the pointer is still down, so the drag resizes the real thing.
+    #[test]
+    fn a_placement_drag_creates_the_node_once_and_resizes_it_while_it_runs() {
+        let mut state = Interaction::default();
+        let effects = drive(
+            &mut state,
+            &GestureConfig::default(),
+            &BTreeSet::new(),
+            vec![
+                Input::ArmTool(Some(NodeType::Text)),
+                Input::Down {
+                    button: Button::Left,
+                    screen: Point::new(0.0, 0.0),
+                    modifiers: Modifiers::default(),
+                    on: None,
+                },
+                // Inside the threshold: still nothing on the canvas.
+                Input::Move {
+                    screen: Point::new(2.0, 0.0),
+                },
+                Input::Move {
+                    screen: Point::new(600.0, 400.0),
+                },
+                Input::Move {
+                    screen: Point::new(800.0, 400.0),
+                },
+                Input::Up {
+                    button: Button::Left,
+                    screen: Point::new(800.0, 400.0),
+                },
+            ],
+        );
+
+        assert_eq!(
+            effects,
+            vec![
+                Effect::PlaceNode {
+                    node_type: NodeType::Text,
+                    world: Rect::new(Point::new(0.0, 0.0), Size::new(300.0, 200.0)),
+                },
+                Effect::ResizePlacement {
+                    world: Rect::new(Point::new(0.0, 0.0), Size::new(400.0, 200.0)),
+                },
+                Effect::CommitPlacement,
+            ]
+        );
+        assert!(state.is_idle(), "the tool disarms once the node is placed");
     }
 
     /// Camera in [`drive`]: zoom 2, pan 0, so screen `(x, y)` is world `(x / 2, y / 2)`.

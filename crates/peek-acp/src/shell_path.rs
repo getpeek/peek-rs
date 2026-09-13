@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use crate::AcpSpawnConfig;
+use crate::config::AcpSpawnConfig;
 
 /// Build the spawn config, resolving the command to an absolute path first.
 ///
@@ -22,7 +22,7 @@ use crate::AcpSpawnConfig;
 /// # Errors
 /// Returns an error if a bare command can't be found on the search path, so the
 /// node surfaces an actionable message instead of a downstream `os error 2`.
-pub async fn spawn_config(
+pub(crate) async fn spawn_config(
     command: &str,
     args: Vec<String>,
     env: Vec<(String, String)>,

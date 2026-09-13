@@ -19,12 +19,26 @@ icon_assets!(
         Type,
         AtSign,
         Pencil,
-        Activity,
         Trash,
         Brackets,
         Lock,
         LockOpen,
         ChevronDown,
+        // The agent node.
+        ChevronRight,
+        GitFork,
+        SendHorizontal,
+        Square,
+        Lightbulb,
+        DatabaseZap,
+        Bot,
+        TriangleAlert,
+        CircleCheck,
+        CircleDot,
+        Circle,
+        Wrench,
+        LoaderCircle,
+        ShieldAlert,
     ]
 );
 

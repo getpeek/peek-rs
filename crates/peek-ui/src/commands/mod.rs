@@ -31,10 +31,12 @@ pub const QUERY_NODE: &str = "QueryNode";
 /// A result node's own context, for the commands that act on the table's selection while the
 /// table holds focus.
 pub const RESULT_NODE: &str = "ResultNode";
+pub const AGENT_NODE: &str = "AgentNode";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Group {
     Tool,
+    Agent,
     Query,
     Edit,
     History,
@@ -49,6 +51,7 @@ impl Group {
     pub const fn title(self) -> &'static str {
         match self {
             Self::Tool => "Tools",
+            Self::Agent => "Agent",
             Self::Query => "Query",
             Self::Edit => "Edit",
             Self::History => "History",
@@ -109,6 +112,11 @@ fn has_selected_queries(scope: &Scope) -> bool {
 /// Entering a query's editor needs one unambiguous query to enter.
 fn one_selected_query(scope: &Scope) -> bool {
     scope.selected == 1 && scope.selected_queries == 1
+}
+
+/// Forking, stopping and cycling modes all act on one unambiguous agent node.
+fn one_selected_agent(scope: &Scope) -> bool {
+    scope.selected == 1 && scope.selected_agents == 1
 }
 
 fn can_undo(scope: &Scope) -> bool {
@@ -235,6 +243,47 @@ pub static COMMANDS: &[Command] = &[
         available: always,
     },
     Command {
+        id: "Tool::Agent",
+        title: "New agent node",
+        group: Group::Tool,
+        keywords: "place add ai chat llm assistant",
+        default_keys: &["a"],
+        context: CANVAS_NOT_TYPING,
+        build: || Box::new(actions::tool::Agent),
+        available: always,
+    },
+    Command {
+        id: "Agent::Fork",
+        title: "Fork conversation",
+        group: Group::Agent,
+        keywords: "branch copy duplicate agent chat",
+        default_keys: &[],
+        context: CANVAS_NOT_TYPING,
+        build: || Box::new(actions::agent::Fork),
+        available: one_selected_agent,
+    },
+    Command {
+        id: "Agent::CycleMode",
+        title: "Cycle agent mode",
+        group: Group::Agent,
+        keywords: "acp plan accept edits switch",
+        // Fires while the composer holds focus, which is where it is pressed.
+        default_keys: &["shift-tab"],
+        context: AGENT_NODE,
+        build: || Box::new(actions::agent::CycleMode),
+        available: one_selected_agent,
+    },
+    Command {
+        id: "Agent::Stop",
+        title: "Stop the agent",
+        group: Group::Agent,
+        keywords: "cancel halt interrupt turn",
+        default_keys: &[],
+        context: AGENT_NODE,
+        build: || Box::new(actions::agent::Stop),
+        available: one_selected_agent,
+    },
+    Command {
         id: "Page::Search",
         title: "Find in result",
         group: Group::Page,
@@ -305,7 +354,7 @@ pub static COMMANDS: &[Command] = &[
         group: Group::Tool,
         keywords: "pen freehand sketch stroke ink annotate",
         default_keys: &["d"],
-        context: CANVAS,
+        context: CANVAS_NOT_TYPING,
         build: || Box::new(actions::tool::Draw),
         available: always,
     },
@@ -512,6 +561,25 @@ mod tests {
         let command = find("Query::Run").expect("Query::Run is registered");
         assert_eq!(command.context, QUERY_NODE);
         assert_eq!(command.default_keys, &["meta-enter"]);
+    }
+
+    /// A bare printable key must never fire while an editor holds focus, or it is impossible
+    /// to type that letter into a query, text or variable node.
+    #[test]
+    fn unmodified_letter_keys_do_not_fire_while_typing() {
+        for command in COMMANDS {
+            for combo in command.default_keys {
+                let bare_letter = combo.len() == 1
+                    && combo
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric());
+                assert!(
+                    !bare_letter || command.context.contains("!Input"),
+                    "{}: {combo} fires while typing",
+                    command.id
+                );
+            }
+        }
     }
 
     #[test]

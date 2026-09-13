@@ -28,9 +28,9 @@ pub use migrate::normalize;
 pub use node::{
     ActivityData, ActivityFilter, AgentData, AgentProvider, BarChartData, ChartType, DrawData,
     ErrorData, LiveInterval, Node, NodeData, NodeKind, QueryData, ResultData, ResultInsertFormData,
-    TableDefinitionData, TextData, VariableData, VariableRow, VariableValue,
+    TableDefinitionData, TextData, VariableData, VariableRow, VariableValue, is_variable_name,
 };
-pub use region::{Region, RegionStatus};
+pub use region::{REGION_COLOR_COUNT, Region, RegionStatus};
 pub use result::{Cell, Column, ResultSet};
 pub use results_file::{ResultSidecar, ResultsFile};
 pub use sql_type::{

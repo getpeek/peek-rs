@@ -62,9 +62,29 @@ Copied module for module. Four deltas, all forced or additive:
   `is_unbounded_write` (ported from `isUnboundedWrite.ts`, ready for M5's confirmation gate),
   `variable_sites`, and `sql_highlights`.
 
+- **`completion::ranking`**, a module with no counterpart in the Tauri app. There, Monaco owned
+  filtering: `lspProvider.ts` answered `incomplete: true` and Monaco re-queried, fuzzy-matched and
+  ranked the suggestions itself against the word under the cursor. gpui-component's
+  `ContextMenuDelegate` does not override `perform_search` — it renders the array it is handed, in
+  order — so that step lives in the server here. `rank` drops what the typed prefix cannot mean,
+  orders the rest by match class (exact, prefix, word prefix, subsequence) then kind then length,
+  and records the matched leading run in `filter_text`, which is the only thing the vendored row
+  renderer can highlight. `table_items` no longer sorts: ordering has one authority.
+- **`variable_prefix_at`** in `sql_text`, for the `@`-triggered provider `SqlEditor.tsx` registers
+  beside the SQL one. The names come from the canvas, so `peek-ui` builds the items; the crate
+  only answers where an `@name` is being typed.
+
 `SchemaIndex` is reached through `SharedSchema`/`shared_schema`/`set_schema` so callers never
 name `parking_lot`. M5 fills it; nothing else changes.
 
-Not ported and not needed: `lspBridge.ts`'s LSP→Monaco kind mapping (gpui-base speaks
+Not ported and not needed: `lspBridge.ts`'s LSP→Monaco **kind mapping** (gpui-base speaks
 `lsp-types` 0.97, the same version `peek-lsp` does, so completions and diagnostics pass through
-unconverted), `overflowWidgets.ts`, and most of `editor.css`.
+unconverted), `overflowWidgets.ts` — the popover is a deferred draw that inherits the node's rem
+scope, so it needs no hand-applied zoom transform, only a zoom-scaled `max_width` — and most of
+`editor.css`.
+
+The rest of what Monaco did was **not** free, and saying "not needed" about the whole bridge was
+wrong: filtering and ranking had to be rebuilt as `completion::ranking`. `isSnippet` /
+`insertTextRules` has no equivalent at all — `insert_completion` inserts `new_text` verbatim, so a
+`SNIPPET`-format item would land with its tab stops literal. Harmless today: the only snippet
+`peek-lsp` emits is the FK join predicate, and it is `PLAIN_TEXT`.

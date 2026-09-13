@@ -61,9 +61,16 @@ pub mod query {
     actions!(Query, [Format, Focus, Run]);
 }
 
+/// Agent-node commands. `CycleMode` and `Stop` fire while the composer holds focus, which is
+/// why they sit on the node's own context rather than the canvas'.
+pub mod agent {
+    use super::actions;
+    actions!(Agent, [Fork, CycleMode, Stop]);
+}
+
 pub mod view {
     use super::actions;
-    actions!(View, [ToggleUi, ToggleCameraLock, ShowRunningQueries]);
+    actions!(View, [ToggleUi, ToggleCameraLock]);
 }
 
 pub mod command_palette {

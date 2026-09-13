@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{NodeId, RegionId};
 
+/// Entries in a theme's region palette. `color_index` is assigned modulo this, so a document
+/// written by one theme stays legible under another.
+pub const REGION_COLOR_COUNT: usize = 5;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RegionStatus {
