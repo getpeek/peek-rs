@@ -346,8 +346,10 @@ itself, while `NUMERIC` — which rides as text to keep its precision — does.
 
 Find is `cmd-f` (`Page::Search`, on the node's context), debounced 100 ms, threshold 0.5, rows
 re-sorted by their best cell and matched cells tinted. **The scoring is ours, not fuzzysort's.**
-gpui-component has no fuzzy matcher — its palette is a plain case-insensitive `contains` — so
-rather than add a dependency, `search.rs` scores a subsequence on three things a database grid
+gpui-component has no fuzzy matcher — its own palette is a plain case-insensitive `contains`,
+which is why Peek's palette turns that filter off and ranks with `crate::fuzzy` like every other
+search surface here (`docs/commands.md`) — so rather than add a dependency, `search.rs` scores a
+subsequence on three things a database grid
 cares about: an unbroken run beats a scattered match, a match at the start of a value beats one
 in the middle, and a shorter value holding the match beats a longer one. The threshold is
 calibrated so a scattered subsequence falls below it and a literal substring clears it easily.

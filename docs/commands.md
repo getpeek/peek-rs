@@ -30,7 +30,7 @@ pub struct Command {
     pub title: &'static str,          // the stable name: tooltips, the keymap modal
     pub label: Option<fn(&Scope) -> &'static str>, // palette label when it follows state
     pub group: Group,
-    pub keywords: &'static str,       // palette search terms
+    pub keywords: &'static str,       // extra palette search terms, whitespace-separated
     pub default_keys: &'static [&'static str], // Peek syntax ("meta-shift-0")
     pub context: &'static str,        // gpui key-context predicate
     pub build: fn() -> Box<dyn Action>,
@@ -49,6 +49,25 @@ preference means adding a field there, not widening the signature.
 `pages`, `camera_locked`, …) computed by `Document::scope()`; the palette filters on it at open
 time and buttons may read it in render. Tests assert every `(build)().name() == id` and that every
 default key translates.
+
+## Palette search
+
+`Scope` decides what the palette *offers*; what it *shows* is decided by `commands/palette.rs`,
+which ranks with `crate::fuzzy` — the same subsequence scorer behind the connection picker, the
+result find bar and page search. gpui-component's own filter is a case-insensitive `contains` over
+the label, which neither finds "Fit all nodes in view" from `fitv` nor puts the best answer first,
+so `Command::filterable(false)` switches it off and `on_query` installs our ranking instead.
+
+Each keyword is scored as its own haystack, not as one joined string: a subsequence is free to
+wander across two unrelated terms otherwise, and a short keyword's density would be lost. Keyword
+hits then take a small discount (`KEYWORD_WEIGHT`), because keywords are short enough to score
+near-perfectly and would otherwise bury the row whose visible title the reader was typing. A row
+matched only by a keyword draws unhighlighted — there is nothing on it holding those characters.
+
+The dialog is mounted inside `WorkspaceView::render`, so re-ranking has to end in a repaint of the
+workspace; `CommandState` re-rendering itself is not enough to rebuild the row list. The ranked
+rows live in their own `Listing` entity for the same reason — the dialog's content builder runs
+while the workspace is rendering, and reading the entity being rendered is a double lease.
 
 Implemented ids: `Zoom::{In,Out,Reset,FitView,FitSelection,FitSelectionAndLock}`,
 `Edit::{SelectAll,DeleteSelection,Copy}`, `History::{Undo,Redo}`,

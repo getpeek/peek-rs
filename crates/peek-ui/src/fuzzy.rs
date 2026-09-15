@@ -1,5 +1,5 @@
-//! Subsequence scoring, shared by the result table's find bar and the connection picker's
-//! search.
+//! Subsequence scoring, shared by every search surface in the app: the result table's find bar,
+//! the connection picker, page search and the command palette.
 //!
 //! The reference uses `fuzzysort` in both places. There is no fuzzy matcher in gpui-component —
 //! its command palette is a plain case-insensitive `contains` — so the scoring here is **ours**,
@@ -10,6 +10,14 @@
 //! What it rewards, in the order that matters where people mostly type a literal fragment: a
 //! contiguous run beats a scattered one, a match at the start of the value beats one in the
 //! middle, and a shorter haystack beats a longer one holding the same match.
+//!
+//! [`highlight`] lives here too rather than beside either caller: it renders exactly what
+//! [`Match::indices`] records, and page search and the palette draw it the same way.
+
+use gpui_kit::component::StyledExt;
+use gpui_kit::prelude::*;
+use gpui_kit::{AnyElement, App, SharedString, div};
+use peek_theme::ActivePeekTheme;
 
 /// `MATCH_THRESHOLD` in the reference: 1 is perfect, 0.5 is a good match, 0 is none.
 pub(crate) const MATCH_THRESHOLD: f64 = 0.5;
@@ -94,6 +102,34 @@ fn rate(hay: &[char], indices: &[usize]) -> f64 {
     let density = matched as f64 / hay.len() as f64;
 
     (run * 0.6) + (at_start * 0.25) + (density * 0.15)
+}
+
+/// Splits `text` into the runs a query matched and the runs it did not, so the characters still
+/// to be typed are the ones that stand out — `highlightMatch` in the reference.
+///
+/// Marked runs take the accent *and* semibold: on a highlighted row the accent background is
+/// already close to the accent foreground, and weight is what still reads there.
+pub(crate) fn highlight(text: &SharedString, indices: &[usize], cx: &App) -> Vec<AnyElement> {
+    let theme = cx.peek_theme();
+    let mut runs: Vec<(bool, String)> = Vec::new();
+    for (position, character) in text.chars().enumerate() {
+        let matched = indices.contains(&position);
+        match runs.last_mut() {
+            Some((last, run)) if *last == matched => run.push(character),
+            _ => runs.push((matched, character.to_string())),
+        }
+    }
+    runs.into_iter()
+        .map(|(matched, run)| {
+            div()
+                .flex_none()
+                .when(matched, |this| {
+                    this.text_color(theme.accent).font_semibold()
+                })
+                .child(run)
+                .into_any_element()
+        })
+        .collect()
 }
 
 #[cfg(test)]

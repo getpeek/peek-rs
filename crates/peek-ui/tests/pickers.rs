@@ -126,12 +126,14 @@ fn the_palette_offers_one_go_to_row_per_inactive_page(cx: &mut TestAppContext) {
 }
 
 /// The palette state is retained across opens, so a command executed from a search would leave
-/// that search filtering the list the next time the palette came up. Row `(0,0,0)` is the first
-/// registry command, "Zoom in", which the query below cannot match.
+/// that search filtering the list the next time the palette came up.
+///
+/// `bigger` is the keyword of `Zoom::In` and of nothing else, so the ranked list is one row long:
+/// row `(0,0,0)` survives — which is what Enter then executes — and row `(0,1,0)` does not.
 #[gpui_kit::test]
 fn executing_a_command_clears_the_palette_query(cx: &mut TestAppContext) {
     let (handle, _) = open(cx);
-    let first_row = "index-path(0,0,0)";
+    let second_row = "index-path(0,1,0)";
 
     cx.update_window(handle.into(), |_, window, cx| {
         window.dispatch_action(Box::new(actions::command_palette::Open), cx);
@@ -141,7 +143,7 @@ fn executing_a_command_clears_the_palette_query(cx: &mut TestAppContext) {
     render(cx, handle);
 
     cx.update_window(handle.into(), |_, window, cx| {
-        window.input("text", cx);
+        window.input("bigger", cx);
     })
     .unwrap();
     cx.run_until_parked();
@@ -149,8 +151,12 @@ fn executing_a_command_clears_the_palette_query(cx: &mut TestAppContext) {
 
     cx.update_window(handle.into(), |_, window, _| {
         assert!(
-            window.try_find(first_row).is_none(),
-            "the query filters the first command away"
+            window.try_find("index-path(0,0,0)").is_some(),
+            "the one command the query ranks"
+        );
+        assert!(
+            window.try_find(second_row).is_none(),
+            "and the query filters every other command away"
         );
     })
     .unwrap();
@@ -169,8 +175,38 @@ fn executing_a_command_clears_the_palette_query(cx: &mut TestAppContext) {
 
     cx.update_window(handle.into(), |_, window, _| {
         assert!(
-            window.try_find(first_row).is_some(),
+            window.try_find(second_row).is_some(),
             "reopening the palette starts from an empty query"
+        );
+    })
+    .unwrap();
+}
+
+/// The ranking has to reach the screen, not just the entity: `on_query` re-ranks, and only a
+/// workspace repaint rebuilds the dialog's content with the new order. `fitv` is a subsequence of
+/// "Fit all nodes in view" and a substring of nothing, so it lists no rows at all without it.
+#[gpui_kit::test]
+fn a_fuzzy_query_ranks_rows_into_the_open_palette(cx: &mut TestAppContext) {
+    let (handle, _) = open(cx);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.dispatch_action(Box::new(actions::command_palette::Open), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    render(cx, handle);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.input("fitv", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    render(cx, handle);
+
+    cx.update_window(handle.into(), |_, window, _| {
+        assert!(
+            window.try_find("index-path(0,0,0)").is_some(),
+            "a query no substring filter could match still ranks a first row"
         );
     })
     .unwrap();

@@ -26,6 +26,7 @@ use peek_theme::ActivePeekTheme;
 
 use super::CanvasView;
 use crate::commands::actions;
+use crate::fuzzy::highlight;
 
 use corpus::{Entry, Group};
 
@@ -273,27 +274,4 @@ fn row(label: &SharedString, indices: &[usize], snippet: &SharedString, cx: &App
                 .child(snippet.clone()),
         )
         .into_any_element()
-}
-
-/// Splits `label` into runs the query matched and runs it did not, so the characters still to be
-/// typed are the ones that stand out — `highlightMatch` in the reference.
-fn highlight(label: &SharedString, indices: &[usize], cx: &App) -> Vec<AnyElement> {
-    let theme = cx.peek_theme();
-    let mut runs: Vec<(bool, String)> = Vec::new();
-    for (position, character) in label.chars().enumerate() {
-        let matched = indices.contains(&position);
-        match runs.last_mut() {
-            Some((last, text)) if *last == matched => text.push(character),
-            _ => runs.push((matched, character.to_string())),
-        }
-    }
-    runs.into_iter()
-        .map(|(matched, text)| {
-            div()
-                .flex_none()
-                .when(matched, |run| run.text_color(theme.accent).font_semibold())
-                .child(text)
-                .into_any_element()
-        })
-        .collect()
 }

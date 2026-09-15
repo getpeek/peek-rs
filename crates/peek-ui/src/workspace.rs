@@ -23,7 +23,10 @@ use peek_document::{
 use crate::Launch;
 use crate::autosave::Autosave;
 use crate::canvas::CanvasView;
-use crate::commands::{self, actions, palette::PaletteEntry};
+use crate::commands::{
+    self, actions,
+    palette::{Hit, Listing},
+};
 use crate::mcp::McpBridge;
 use crate::title_bar::PeekTitleBar;
 use crate::title_bar::connection::ConnectionPill;
@@ -438,39 +441,70 @@ impl WorkspaceView {
         let scope = self.canvas.read(cx).scope(cx);
         log::debug!("peek: opening palette with scope {scope:?}");
         let document = self.document(cx);
-        let available: Vec<PaletteEntry> = commands::palette::entries(document.read(cx), &scope);
+        let available = commands::palette::entries(document.read(cx), &scope);
+        let listing = cx.new(|_| Listing::new(available));
         let state = self.palette.clone();
         let focus = self.canvas_focus.clone();
+        let workspace = cx.entity().downgrade();
 
         window.open_dialog(cx, move |dialog, _, _| {
             let dialog = bare(dialog);
-            let available = available.clone();
             let focus = focus.clone();
             let state = state.clone();
-            dialog.overlay_closable(true).content(move |content, _, _| {
-                let focus = focus.clone();
-                let items = available.iter().map(|entry| {
-                    CommandItem::new()
-                        .label(entry.title.clone())
-                        .keywords(entry.keywords.split_whitespace().map(str::to_owned))
-                });
-                let confirmed = available.clone();
-                content.child(
-                    CommandPalette::new(&state)
-                        .items(items)
-                        .on_confirm(move |path, window, cx| {
-                            window.close_dialog(cx);
-                            if let Some(entry) = confirmed.get(path.row) {
-                                focus.dispatch_action(&*entry.action, window, cx);
-                            }
-                        })
-                        .on_cancel(WindowExt::close_dialog),
-                )
-            })
+            let listing = listing.clone();
+            let workspace = workspace.clone();
+            dialog
+                .overlay_closable(true)
+                .content(move |content, _, cx| {
+                    let focus = focus.clone();
+                    // A different entity than the one being rendered: `WorkspaceView` mounts the
+                    // dialog layer, so reading *it* from here would be a double lease.
+                    let hits: Vec<Hit> = listing.read(cx).matched().to_vec();
+                    let items: Vec<CommandItem> = hits.iter().map(palette_row).collect();
+                    let querying = listing.clone();
+                    let repaint = workspace.clone();
+                    content.child(
+                        CommandPalette::new(&state)
+                            .items(items)
+                            // The ranking is ours; a second `contains` pass over rows we already
+                            // chose would only throw the best of them away.
+                            .filterable(false)
+                            .on_query(move |query, _, cx| {
+                                querying.update(cx, |listing, _| listing.refine(query));
+                                // The dialog layer is part of the workspace's element tree, so only
+                                // a workspace repaint rebuilds this content with the new order.
+                                repaint.update(cx, |_, cx| cx.notify()).ok();
+                            })
+                            .on_confirm(move |path, window, cx| {
+                                window.close_dialog(cx);
+                                if let Some(hit) = hits.get(path.row) {
+                                    focus.dispatch_action(&*hit.entry.action, window, cx);
+                                }
+                            })
+                            .on_cancel(WindowExt::close_dialog),
+                    )
+                })
         });
         self.palette
             .update(cx, |palette, cx| palette.focus(window, cx));
     }
+}
+
+/// One palette row: the title, with the characters the query matched standing out.
+///
+/// A custom child owns the whole row, keybinding hint included — the palette has never shown one
+/// (it dispatches through the canvas focus handle rather than `CommandItem::action`), so there is
+/// none to lose. The label is still set: it is what the row says it is.
+fn palette_row(hit: &Hit) -> CommandItem {
+    let title = hit.entry.title.clone();
+    let matched = hit.title_match.clone();
+    CommandItem::new().label(title.clone()).child(move |_, cx| {
+        div()
+            .h_flex()
+            .flex_1()
+            .min_w_0()
+            .children(crate::fuzzy::highlight(&title, &matched, cx))
+    })
 }
 
 /// Opens the database behind the connection just loaded, if `settings.json` describes one.
