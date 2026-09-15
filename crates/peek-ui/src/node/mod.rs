@@ -16,7 +16,9 @@ pub(crate) mod text;
 pub(crate) mod variable;
 
 use gpui_kit::TestSupportExt;
-use gpui_kit::component::StyledExt;
+use gpui_kit::assets::IconName;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::{Icon, Sizable, StyledExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{AnyElement, App, Div, Hsla, Pixels, Rems, SharedString, Window, div, rems};
 use peek_document::{Node, NodeType};
@@ -82,6 +84,9 @@ pub(crate) trait TextInsetExt: Styled + Sized {
 
 impl<T: Styled> TextInsetExt for T {}
 
+/// What the header's X runs. Boxed because a `RenderOnce` cannot hold a `Context`.
+type CloseHandler = Box<dyn Fn(&mut Window, &mut App) + 'static>;
+
 /// The chrome around a node body. Kinds contribute a `body` element and optional header
 /// controls; everything else — frame, header, brackets — is identical for all of them.
 #[derive(IntoElement)]
@@ -90,6 +95,9 @@ pub(crate) struct NodeShell {
     node_type: Option<NodeType>,
     title: SharedString,
     header_extras: Option<AnyElement>,
+    /// What the header's X does. A closure rather than a node id, because deleting is a command
+    /// and only the canvas can dispatch one.
+    close: Option<CloseHandler>,
     body: AnyElement,
     selected: bool,
 }
@@ -101,9 +109,17 @@ impl NodeShell {
             node_type: node.node_type(),
             title: kind::title(node, cx).into(),
             header_extras: None,
+            close: None,
             body,
             selected,
         }
+    }
+
+    /// The header's delete button (`NodeHeader.tsx`, which gives every kind one).
+    #[must_use]
+    pub(crate) fn on_close(mut self, close: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.close = Some(Box::new(close));
+        self
     }
 
     /// Controls the kind adds to the right of its header (a live toggle, a chart-type switch).
@@ -112,6 +128,20 @@ impl NodeShell {
         self.header_extras = extras;
         self
     }
+}
+
+/// `.header-icon-btn`: quiet until hovered, so the one destructive control on a node does not
+/// advertise itself.
+fn close_button(node: &SharedString, close: CloseHandler) -> impl IntoElement {
+    Button::new(SharedString::from(format!("{node}-close")))
+        .ghost()
+        .xsmall()
+        .size(rems(1.125))
+        .p_0()
+        .flex_shrink_0()
+        .tooltip("Delete")
+        .child(Icon::new(IconName::X).size(rems(0.75)))
+        .on_click(move |_, window, cx| close(window, cx))
 }
 
 fn indicator(kind: TypeIndicator, accent: Hsla) -> Div {
@@ -167,6 +197,9 @@ impl RenderOnce for NodeShell {
         };
         let hover_border = theme.node_border_strong;
 
+        let node = self.id.clone();
+        let close = self.close.map(|close| close_button(&node, close));
+
         div()
             .id(self.id)
             .test_support()
@@ -199,7 +232,8 @@ impl RenderOnce for NodeShell {
                             .child(label),
                     )
                     .child(div().flex_1().min_w_0().truncate().child(self.title))
-                    .children(self.header_extras),
+                    .children(self.header_extras)
+                    .children(close),
             )
             .child(div().flex_1().min_h_0().overflow_hidden().child(self.body))
             .children(corner_brackets(theme, self.selected))

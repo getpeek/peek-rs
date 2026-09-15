@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-09-13.
+Last updated: 2026-09-15.
 
 ## Milestones
 
@@ -50,6 +50,10 @@ Deliberate divergences from the reference, each for a stated reason:
   simulation means autosave never quiesces and the undo coalescing window never closes.
   Schema edges are persisted, which *is* the reference's shape — `edgesAtom`'s setter writes into
   `doc.pages[…].edges`.
+- **"Fit nodes to view" clamps its tiles to `NodeType::min_size()`.** The reference writes raw
+  tile widths and heights, so a large selection produces nodes smaller than their own resize
+  handles allow. `Document::set_bounds` clamps, and overlapping readable cards beat unreadable
+  slivers. The BSP maths itself is the reference's, constant for constant.
 - **One key, two meanings, chosen by focus.** `Edit::Copy` is a single action on
   `CANVAS_NOT_TYPING`: the canvas copies the selected nodes, and a focused result table copies
   its cells as TSV instead, winning on depth.
@@ -199,9 +203,18 @@ Two deliberate differences from the reference, both forced by `DataTable` virtua
 Column widths are the reference's: the longest of the header and the first 30 values at 7.2 px a
 character plus 28 padding, clamped to 80–360, with an explicit width from `columnWidths`
 overriding and uncapped, and the whole set scaled up when the columns do not fill the node.
-Numbers are right-aligned in tabular figures; `NULL` is muted italic, `TRUE`/`FALSE` take the
-blue and red the stylesheet gives them, and a `Cell::Undecodable` says "unreadable" rather than
-passing for a NULL.
+Every value is left-aligned, because `Result.css` has no alignment rule for a `td` at all and the
+table is mono, so a column of numbers lines up anyway. `NULL` is muted italic, `TRUE`/`FALSE` take
+the blue and red the stylesheet gives them, a `Cell::Undecodable` says "unreadable" rather than
+passing for a NULL, and a key or reference value sits in the `.reference` chip — a 1 px border at
+28 % of its role colour over an 11 % fill — rather than being tinted text.
+
+**Cells are full-bleed and pad themselves.** gpui-component pads the cell container it owns
+(`table/state.rs`), which left the 8 px gutters between two selected cells unpainted, broke a row
+band's outline into per-cell segments and put a `node_bg_2` frame around every header. The columns
+now ask for `Column::p_0` and the delegate applies `Result.css`'s own `7px 14px` (`9px 14px` on a
+header) inside the element it owns — in **world units**, so unlike the crate's fixed pixels the
+padding scales with the camera the way the row height already did.
 
 **The table sizes itself in pixels, so it is the first kind that needs the camera's zoom.**
 Everything else is rem-based and scales for free inside `with_rem_size(base * zoom)`, but a
@@ -264,16 +277,67 @@ Two wiring rules this needed, both found by watching a test fail:
   canvas, not an ancestor — holds focus. `CanvasView::reclaim_focus` covers the handle dying
   with the node.
 
+**Both rules apply to a header press, and for a while neither did**, which is the whole of why
+column headers looked dead: the press selected the column and the body's clear-on-press wiped it
+in the same event, every time. `clicking_a_column_header_selects_the_column` is the regression
+test, and removing that `stop_propagation` is what makes it fail. The same press also took
+`rows.row_count()` where it wanted the *visible* count, so a header click during a search selected
+positions that were not on screen. A header now also carries `cursor: pointer` and tints its
+column name on hover (`thead th:hover .col-name`), which is the only cue the reference gives that
+a header is a control at all.
+
+**The selection is drawn as an outline on its boundary cells**, not as a rectangle over the range
+(`Result.css`, "Selection outline"). Each cell asks which sides of the live selection it sits on
+and draws those borders — 1.5 px in the accent, 7 px on the outer corners — on an absolutely
+positioned overlay, so turning a border on never moves the text under it. An interior cell draws
+nothing, so what is left is the perimeter, and a run of selected rows comes out as one rounded
+band while two disjoint rows come out as two, with nothing anywhere that knows what a band is.
+
+Ported as a background tint alone, the selection was **invisible**: `--pk-row-selected-bg` is a
+4 % mix over the node background on three of the six themes, and the reference leans on the
+outline to carry it. Two things made that worse and are fixed in the theme rather than the node:
+`table.hover.background` was mapped to the *same* colour as the selection, so a selected row and a
+hovered one were the same pixels, and `table.head.background` was a raised `node_bg_2` where the
+reference puts the head on the node's own ground.
+
+**The dashed ghost preview** is in with it: hovering shows what a press would select — the whole
+column from a header, the whole row while shift is held, the single cell otherwise — in
+`accent_line`, under the solid outline so a real edge always wins. It is suppressed while a button
+is down, while cmd/ctrl turns the drag into a node move, and over a cell already selected, where
+it would only blur the selection it sits on. The preview is adopted only when the rect actually
+changes, because a mouse move fires many times a second and each one would otherwise repaint the
+node.
+
 The table's accessible label names the selection (`4 cells selected`), which is both what a
 screen reader gets and the only stable observable a test has: `DataTable` registers no ids for
 its cells.
 
-**The toolbar and in-result find** are in. Three exclusive states, in the reference's own
-precedence: the find bar while a search is open, the selection statistics while a numeric
-rectangle is selected, and otherwise the meta row — a status dot, the row count, and a badge per
-table the query reads (`peek_lsp::analyze_query`, recomputed only when the SQL changes). Chart,
-Export and Pivot render **disabled with a tooltip naming what they wait for**, the convention
-`canvas/toolbar.rs` already uses for tools with no command behind them.
+**The toolbar and in-result find** are in, as `ResultToolbar.tsx`'s row of icon buttons. Four
+exclusive states, the first three in the reference's own precedence: the find bar while a search
+is open, the format strip while Export or Copy is asking which one, the selection statistics while
+a numeric rectangle is selected, and otherwise the meta row — a status dot, the row count, and a
+badge per table the query reads (`peek_lsp::analyze_query`, recomputed only when the SQL changes).
+Chart, Export, Copy, Pivot and Search are all live. Ask, Fork and Add row are **not** ported: the
+first two are node spawns worth doing with the features behind them, and Add row needs
+`ResultInsertForm`, which is still a placeholder body.
+
+**Export and Copy open an inline format strip**, not a dropdown. An overlay raised from inside a
+node body lays out at rem 1 whatever the camera is doing and inherits the body's `overflow_hidden`
+mask — the reason the value pane is inline too — so picking CSV or JSON takes over the toolbar row
+the way the find bar does. Copy needed two commands the palette did not have, `Export::CopyCsv`
+and `Export::CopyJson`, over the same `to_csv` / `to_json` serialisers; several selected results
+concatenate with a blank line between them, because one clipboard cannot hold two files and
+dropping all but the first would be a silent loss.
+
+**Chart is wired.** `Result::Chart` is `Document::place_chart`, the port of `createChart.ts`: a
+`barchart` node at `NodeId::chart_of(result)`, placed above the result at `max(width, 500) × 500`
+with an edge from it, in one `transaction_of` so undoing a chart never leaves an empty one behind.
+A second click re-plots the node already there rather than stacking another on it, and leaves the
+chart *type* alone — the data is the query's, the type is the user's. The button is enabled only
+when some column really holds numbers and is not `id` or `*_id`, which is `canChart`; that reads
+the cell's kind, so a NUMERIC arriving as text does not enable it, exactly as the reference's
+`typeof value === "number"` does not. `useChartSync` is **not** ported: a re-run does not yet push
+its new rows into an open chart.
 
 Statistics follow `aggregate.ts`'s one load-bearing rule: **a single non-numeric cell and there
 is no answer at all**. A number under a column of names is worse than no number. A numeric-looking
@@ -303,11 +367,14 @@ Double-clicking a cell opens its full value in a pane under the toolbar: JSON as
 reference's 36-character middle truncation and `123ch` badge, long text wrapped and scrollable,
 NULL and an undecodable value each saying so.
 
-**The pane is inside the node, not floating over it** — a deliberate reversal of the earlier
-plan. gpui lays overlays out at rem 1 whatever the camera is doing, so a popover would not scale
-with the node it explains, and `deferred` inherits the content mask in force where it was created
-— which for a node body is `overflow_hidden`, so it would be clipped by the very table it is
-explaining. The Variable node reached the same conclusion and expands its list editor inline.
+**The pane is inside the node, not floating over it** — and the reasoning first recorded here
+was wrong in both directions, which the context-menu work turned up. A `deferred` draw raised
+inside a node body **does** inherit `BASE_REM * zoom` (`defer_draw` captures the rem size and both
+deferred passes re-enter `with_rem_size`), and it is **not** clipped by the body's
+`overflow_hidden` (`deferred()` passes `content_mask: None`). The conclusion survives on the
+scaling argument alone: a pane explaining a cell is content, belongs to its node, and should grow
+with it — and content that pushes the table down reads better than content floating over it. The
+Variable node expands its list editor inline for the same reason.
 
 **Editing and deleting rows.** Double-clicking a short value opens an editor in the cell; Enter
 commits, escape cancels. A JSON object or anything past 36 characters opens in the value pane
@@ -355,9 +422,45 @@ own. Two fixes to the reference's query, which interpolates
 `Engine::quote_identifier`, so a table called `order` parses, and the value goes through the
 literal formatter, so a key holding an apostrophe cannot end the literal early.
 
+**The right-click menus are in**, both of them: the cell menu's three modes and the column
+header's label-plus-two. They are drawn on the **canvas**, not in the node — an overlay raised
+inside a node body scales with the camera, and a menu is chrome, the same call already made for
+the tool palette and the zoom cluster. `canvas/context_menu.rs` is a hand-owned list of labelled
+actions, following `canvas/jump.rs` and the connection picker; its rows carry ids a test can name,
+which a `PopupMenu`'s index-keyed items do not.
+
+Every item is a registered command, but **scope is context rather than command**: nine entries
+cover a menu the reference spells as twenty items, because the same `Result::CopyAsCsv` copies the
+clicked row, the selected band, a column or the whole result depending on what is picked out
+(`menu/scope.rs`, which is pure index arithmetic and unit-tested as such). From the palette there
+is no pointer, so each falls back to the selection and then to the whole result — none of the nine
+is a row that does nothing. `Export::CopyCsv`/`CopyJson` were deleted: `Result::CopyAs*`
+supersedes them with a finer scope and a third format, and the toolbar's Copy▾ now dispatches
+those. Two of the reference's quirks are kept because they are right: a 1×1 rectangle degrades to
+the single cell, and a rectangle only offers "use as variable" when it spans one column.
+
+Three things the port had to solve that the reference does not have:
+
+- **`DataTable` steals the right press.** It attaches its own `ContextMenu` to the element
+  wrapping every row and registers that listener *after* painting its children, so it is
+  dispatched *before* them: a cell's own handler can neither beat it nor stop it. Its menu is
+  always empty here, but building one retains a `PopupMenu` entity that outlives the window — a
+  leak any test right-clicking in the table trips. `right_press_catcher` is a transparent sibling
+  painted after the table, so it registers later still and claims the press first. It reads what
+  the pointer is over rather than redoing the table's row and column arithmetic.
+- **The scrim dismissed on mouse *down*,** which killed the menu before a row's click could
+  complete — every item silently did nothing. The dropdown and the submenu each claim their own
+  presses; the submenu needs its own because it is positioned beyond the dropdown's right edge and
+  so outside that element's hitbox.
+- **Escape reaches the node before the canvas,** since a right press focuses the table and actions
+  dispatch outward from focus. `ResultTable::clear_selection` takes the menu down first, or escape
+  would clear the selection out from under an open menu.
+
+Not ported: **Duplicate row**, which spawns a `result-insert-form` node — still a placeholder body,
+so the item would open an empty rectangle.
+
 Still to come: per-character match highlighting (matched *cells* are tinted; the reference also
-underlines the matched characters), the dashed ghost hover preview, export, the context menus,
-pivot and chart sync. The editors are single-line fields for now: the reference gives booleans a
+underlines the matched characters) and chart sync. The editors are single-line fields for now: the reference gives booleans a
 three-state picker and long text a growing textarea, and `@variable` autocompletion inside a cell
 is not ported. Keyboard cell navigation is absent in the
 reference too, and went out with `DataTable`'s own selection; it is worth adding back on our
@@ -538,10 +641,15 @@ Every node in M4 was verified through headless `#[gpui_kit::test]` dispatch agai
 sources. Nothing in that harness reads rendered pixels, so these are open until someone runs
 `cargo run` and looks:
 
-- **The completion popover on a node near the edge of the viewport.** It is a `deferred` draw,
-  so it inherits the content mask in force where it was created — the node body clips with
-  `overflow_hidden`. If it turns out to be cut, the fix is to stop clipping the query body, not
-  to move the popover.
+- **The result table's selection at a few zoom levels.** The outline, the dashed ghost preview,
+  the `.reference` chips and the toolbar's icon row are all new paint, and nothing in the headless
+  harness reads a pixel: the tests assert the *model* (`6 cells selected`) and the document, never
+  what was drawn. Worth checking that a range's border joins across cells rather than showing
+  seams, and that the ghost is dimmer than the selection rather than competing with it.
+- **The right-click menu at 0.4 and 2.5 zoom, and near the window's edges.** It is drawn on the
+  canvas rather than in the node precisely so it does *not* scale; that wants looking at once, as
+  does a submenu opened next to the right edge, where the dropdown flips but the submenu does not
+  yet.
 - **Draw at several zoom levels.** Its stroke recovers the zoom factor itself rather than through
   the rem scope, and that path is only unit-asserted — never driven through a real zoomed frame.
   The live preview compensates for zoom the other way round, by hand, so the two have to agree:
@@ -612,6 +720,11 @@ listeners, the HUD and the toolbar are rebuilt every frame, which is cheap next 
   needs it. What the headless tests do cover is that the gate holds: Save and Duplicate change
   nothing under `ReadOnly`.
 - Two kinds still show the placeholder body: `ResultInsertForm` and Activity.
+- **Every node with a shell now has a delete X in its header** (`NodeHeader.tsx` gives every kind
+  one). It selects the node and dispatches `Edit::DeleteSelection` rather than reaching into the
+  document, so it is one undo step and stays on the same path as the key and the palette. Text and
+  Draw have no header to put it in — `kind::is_bare` — which is also why the test for it uses a
+  query-error node.
 - **The agent node talks to a real agent.** `a` or the toolbar places one; it streams an ACP
   session (Claude Code by default) or a local Ollama model, renders thoughts, plans, tool
   disclosures and permission prompts, and forks a conversation into a sibling node. A turn

@@ -93,6 +93,25 @@ Decisions taken with the user, plus reasoning that is not visible in the code.
 - **Contrast test floor is WCAG AA** because Paper's ink-on-cream ships at 6.1:1 in the original.
 - **No system-wide synthetic input for verification.** An early attempt sent keystrokes to the
   wrong app. Headless `#[gpui_kit::test]` is the verification path.
+- **`table.head` and `table.hover` are remapped, not worked around in the node.** The result table
+  is the only `DataTable` in the app, and gpui-component's defaults put the head on a raised
+  surface and hover on the selection colour — which made a selected row indistinguishable from a
+  hovered one. Both belong in `component_map.rs`, where the reference's `Result.css` values are
+  (`node_bg` and `node_bg_2`), not painted over per cell.
+- **A node's overlay is content; the canvas' is chrome.** A `deferred` draw raised inside a node
+  body inherits `BASE_REM * zoom` and scales with the camera, so a pane that explains a cell goes
+  inline (it belongs to the node) and a right-click menu goes on the canvas as a sibling of
+  `CanvasElement` (it does not). The older note that such a draw is also clipped by the body's
+  `overflow_hidden` was **wrong** — `deferred()` passes `content_mask: None` — and had never been
+  checked; the inline conclusions it was used to justify stand on the scaling argument alone.
+- **The context menu is hand-owned, not `gpui-component`'s.** Besides the scaling, `PopupMenu`
+  keys its items by integer index, so a test can only reach them by position; the connection
+  picker rejected `DropdownMenu` for the same reason. Ours gives every row an id derived from the
+  node.
+- **`radius_selection` is derived, not a per-theme token.** `Result.css` writes `7px` literally on
+  all four selection corners in every theme, so six identical `ThemeSpec` entries would carry no
+  information; it sits in `resolved.rs` beside `row_selected()`, which is derived for the same
+  reason. The rule that a radius comes from the theme still holds — the node never spells it.
 
 ## Verified gpui/gpui-kit facts the design relies on
 

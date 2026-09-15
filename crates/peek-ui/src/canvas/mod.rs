@@ -1,6 +1,7 @@
 //! The canvas view: owns the camera, flights and the gesture state machine, and renders the
 //! `CanvasElement` that places node shells at camera-derived screen positions.
 
+pub(crate) mod context_menu;
 mod convert;
 mod dispatch;
 mod edges;
@@ -30,6 +31,7 @@ use peek_canvas::flight::durations;
 use peek_canvas::gesture::{self, Effect, GestureConfig, Interaction};
 use peek_canvas::hit::{Corner, NodeRegion};
 use peek_canvas::jump::{JumpMode, Pressed};
+use peek_canvas::layout::bsp;
 use peek_canvas::render_scale;
 use peek_canvas::{Camera, CameraFlight, Detail, Document, Layout, Point, Rect, Scope, Size};
 use peek_document::{Edge, NodeId, NodeKind, NodeType, PageId};
@@ -85,6 +87,8 @@ pub(crate) struct CanvasView {
     jump: Option<JumpMode>,
     /// The page-search panel, or `None` when it is closed.
     page_search: Option<page_search::PageSearch>,
+    /// The right-click menu a node raised, or `None` when none is open.
+    context_menu: Option<context_menu::MenuState>,
     /// The node a running placement drag created, which the rest of the drag resizes. The
     /// reducer tracks the gesture; the id lives here because the document mints it.
     placement: Option<NodeId>,
@@ -133,7 +137,7 @@ impl CanvasView {
             }
         });
         Self {
-            node_states: NodeStates::new(document.clone()),
+            node_states: NodeStates::new(document.clone(), cx.entity().downgrade()),
             document,
             camera,
             flight: None,
@@ -147,6 +151,7 @@ impl CanvasView {
             chrome_visible: true,
             jump: None,
             page_search: None,
+            context_menu: None,
             placement: None,
             _focus_out: focus_out,
             organize: None,
@@ -188,8 +193,11 @@ impl CanvasView {
     /// `DataTable` registers no id of its own, so a test cannot reach it through `window.find`;
     /// `TableState`'s `dump_range` and `visible_range` are the observables, and this is the only
     /// way to them. See `docs/testing.md`, "Asserting on a component you cannot name".
-    /// The entity behind a result node, for tests that need its find bar.
-    #[cfg(test)]
+    /// The view behind a result node.
+    ///
+    /// The scoped `Result::*` commands are handled here rather than on the node — the palette
+    /// dispatches through the canvas focus handle, which is an ancestor of node elements — so the
+    /// canvas has to be able to reach the table it is acting on.
     pub(crate) fn result_inner(
         &self,
         node: &peek_document::NodeId,
@@ -342,7 +350,46 @@ impl CanvasView {
     }
 
     /// Converts a window-space pointer position into pane space (the camera's screen space).
-    fn to_pane(&self, window_position: gpui_kit::Point<Pixels>) -> Point {
+    /// Raises a right-click menu at `at` (pane coordinates). The caller builds the entries; the
+    /// canvas only knows how to draw a list of labelled actions.
+    pub(crate) fn open_context_menu(
+        &mut self,
+        menu: context_menu::MenuState,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = Some(menu);
+        cx.notify();
+    }
+
+    /// Opens one row's submenu, or closes whichever was open. Notifies only on a real change,
+    /// because this runs on every pointer move across the menu.
+    pub(crate) fn set_open_submenu(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
+        let Some(menu) = self.context_menu.as_mut() else {
+            return;
+        };
+        if menu.open_submenu == index {
+            return;
+        }
+        menu.open_submenu = index;
+        cx.notify();
+    }
+
+    pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) -> bool {
+        let was_open = self.context_menu.take().is_some();
+        if was_open {
+            cx.notify();
+        }
+        was_open
+    }
+
+    /// The pane's size in plain floats, for clamping a menu inside it.
+    pub(crate) fn pane_size_for_menu(&self) -> (f32, f32) {
+        self.pane_bounds.map_or((0.0, 0.0), |bounds| {
+            (bounds.size.width.into(), bounds.size.height.into())
+        })
+    }
+
+    pub(crate) fn to_pane(&self, window_position: gpui_kit::Point<Pixels>) -> Point {
         convert::from_pixel_point(window_position) - self.pane_origin()
     }
 
@@ -478,22 +525,43 @@ impl CanvasView {
         self.fly_to(target, durations::FIT_NODES, window, cx);
     }
 
+    /// `fitNodesToView.tsx`: tile the selection across the viewport at 100% zoom.
+    ///
+    /// The only zoom command that *writes* to the document. It lays the nodes out to fill the
+    /// pane rather than flying the camera out to wherever they already are — `bsp::fit_selection`
+    /// does the layout, and the camera then simply goes to zoom 1 over the point it was already
+    /// looking at, which is the viewport `computeViewportFit` returns.
+    ///
+    /// The nodes jump and only the camera tweens, as they do in the reference: a resize is a
+    /// document mutation, and animating one would be an autosave per frame.
     fn fit_selection(
         &mut self,
         _: &actions::zoom::FitSelection,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let document = self.document.read(cx);
-        let Some(bounds) = document.bounds_of(document.selected()) else {
+        let center = self.focus_point(window);
+        let (pane, _) = self.framing_pane(window);
+        let laid_out = self.document.update(cx, |document, cx| {
+            // Seals whatever edit was open, so the fit is its own undo step rather than the tail
+            // of the drag that selected the nodes.
+            document.checkpoint();
+            let laid_out = bsp::fit_selection(document, pane, center);
+            if laid_out {
+                cx.notify();
+            }
+            document.checkpoint();
+            laid_out
+        });
+        if !laid_out {
             return;
-        };
-        let (pane, top) = self.framing_pane(window);
-        let target = Self::below_chrome(
-            Camera::fit_bounds(bounds, pane, FitOptions::padding(0.2)),
-            top,
+        }
+        self.fly_to(
+            self.centred_on(center, 1.0, window),
+            durations::FIT_SELECTED,
+            window,
+            cx,
         );
-        self.fly_to(target, durations::FIT_NODES, window, cx);
     }
 
     // ---- keyboard navigation -------------------------------------------------------------
@@ -669,6 +737,11 @@ impl CanvasView {
         // leaves the selection alone, as the reference does.
         if self.jump.is_some() {
             self.exit_jump(cx);
+            return;
+        }
+        // A menu is the most transient surface on the canvas: escape dismisses it before it
+        // reaches anything the user might actually lose.
+        if self.close_context_menu(cx) {
             return;
         }
         self.interaction = Interaction::Idle;
@@ -1439,8 +1512,22 @@ impl CanvasView {
                 .into_any_element();
         }
         let extras = node::kind::header_extras(node, context, window, cx);
+        let closing = (document.clone(), node.id.clone());
         NodeShell::new(node, selected, body, cx)
             .header_extras(extras)
+            .on_close(move |window, cx| {
+                // Selecting first and then dispatching keeps the button on the same path as the
+                // Delete key and the palette, rather than reaching into the document itself.
+                let (document, node) = &closing;
+                document.update(cx, |document, cx| {
+                    document.select_only([node.clone()]);
+                    cx.notify();
+                });
+                window.dispatch_action(
+                    Box::new(crate::commands::actions::edit::DeleteSelection),
+                    cx,
+                );
+            })
             .into_any_element()
     }
 
@@ -1631,7 +1718,10 @@ impl Render for CanvasView {
                     .as_ref()
                     .map(|jump| jump::render(jump, camera, cx)),
             )
-            .children(page_search::render(self, cx));
+            .children(page_search::render(self, cx))
+            // Last of all: the menu is the most transient surface on the canvas, and a press
+            // anywhere outside it has to reach its scrim before anything else.
+            .children(context_menu::render(self, cx));
 
         if let Some(started) = started {
             self.frame_stats.record(Phase::Render, started.elapsed());

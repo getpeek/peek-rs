@@ -428,6 +428,13 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The palette state outlives its dialog, so the query typed last time is still in the
+        // input — and still filtering — when the palette opens again. The reference clears it
+        // on every close (`hideSearch`); clearing on open covers confirm, escape and
+        // click-away with one call.
+        self.palette
+            .update(cx, |palette, cx| palette.set_query("", window, cx));
+
         let scope = self.canvas.read(cx).scope(cx);
         log::debug!("peek: opening palette with scope {scope:?}");
         let document = self.document(cx);

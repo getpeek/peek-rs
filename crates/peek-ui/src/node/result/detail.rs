@@ -5,11 +5,16 @@
 //! the same height, so the grid shows a one-line summary and the full value opens here.
 //!
 //! **Inside the node, not floating over it.** An overlay was the first plan, and it is the wrong
-//! shape for this: gpui lays overlays out at rem 1 whatever the camera is doing, so a popover
-//! would not scale with the node it belongs to, and `deferred` inherits the content mask in
-//! force where it was created — which for a node body is `overflow_hidden`, so it would be
-//! clipped by the very table it is explaining. The Variable node reached the same conclusion and
-//! expands its list editor inline for the same reason (`docs/canvas.md`, "Editable nodes").
+//! shape for this — though not for the reasons first written here, which were wrong both ways
+//! round. A `deferred` draw raised from inside a node body **does** scale with the camera:
+//! `defer_draw` captures the rem size in force and both deferred passes re-enter
+//! `with_rem_size`, which `node/query/mod.rs` found the hard way. And it is **not** clipped by
+//! the body's `overflow_hidden`: `deferred()` passes `content_mask: None`, and
+//! `with_content_mask(None)` is a no-op. What actually decides it is that a pane explaining a
+//! cell is *content* — it belongs to the node and should scale with it — and content that
+//! pushes the table down is easier to read than content floating over it. The Variable node
+//! expands its list editor inline for the same reason (`docs/canvas.md`, "Editable nodes"); the
+//! right-click menu is chrome and goes the other way, onto the canvas.
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{Sizable, StyledExt};

@@ -7,7 +7,10 @@
 use std::collections::BTreeMap;
 
 use peek_document::geometry::{Point, Rect, Size};
-use peek_document::{EdgeId, NodeData, NodeId, NodeType, ResultSet, VariableData, VariableValue};
+use peek_document::{
+    EdgeId, NodeData, NodeId, NodeType, ResultSet, VariableData, VariableRow, VariableValue,
+};
+use serde_json::{Map, Value};
 
 use crate::history::EditKind;
 use crate::model::Document;
@@ -31,6 +34,14 @@ const ERROR_NODE_SIZE: Size = Size {
 const RESULT_ROW_HEIGHT: f64 = 50.0;
 const RESULT_HEIGHT_PADDING: f64 = 140.0;
 const MAX_RESULT_HEIGHT: f64 = 1500.0;
+
+/// A chart node's shape, from `createChart.ts`: as wide as the result that fed it but never
+/// narrower than this, always this tall, and sitting above the result with a gap.
+const CHART_MIN_WIDTH: f64 = 500.0;
+const CHART_HEIGHT: f64 = 500.0;
+const CHART_GAP: f64 = 40.0;
+/// How far to the right of a result a variable spawned from it sits (`useCellContextMenu.ts`).
+const VARIABLE_GAP: f64 = 40.0;
 
 /// How big a result node should be for the rows it holds.
 ///
@@ -56,6 +67,43 @@ pub fn result_size(rows: &ResultSet) -> Size {
         width.max(peek_document::MIN_RESULT_WIDTH),
         height.min(MAX_RESULT_HEIGHT),
     )
+}
+
+/// A result's rows as the chart node reads them: one map per row, column name to value.
+///
+/// `buildChartData` in `createChart.ts`. Two rules carry the whole thing: a NULL contributes no
+/// key at all, so a gap in a column is a gap in the series rather than a zero, and a numeric
+/// column that arrived as text — NUMERIC and friends ride as strings to keep their precision —
+/// is coerced, so it plots as a series instead of being read as a row of labels.
+#[must_use]
+pub fn chart_series(rows: &ResultSet) -> Vec<Map<String, Value>> {
+    (0..rows.row_count())
+        .map(|row| {
+            rows.columns()
+                .iter()
+                .enumerate()
+                .filter_map(|(index, column)| {
+                    let value = chart_value(rows.cell(row, index)?, &column.sql_type)?;
+                    Some((column.name.clone(), value))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn chart_value(cell: &peek_document::Cell, sql_type: &str) -> Option<Value> {
+    use peek_document::Cell;
+    match cell {
+        Cell::Null | Cell::Undecodable | Cell::Json(_) | Cell::Bool(_) => None,
+        Cell::Int(number) => Some(Value::from(*number)),
+        Cell::Float(number) => serde_json::Number::from_f64(*number).map(Value::Number),
+        Cell::Text(text) if peek_document::is_numeric(sql_type) => text
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number),
+        Cell::Text(text) => Some(Value::String(text.clone())),
+    }
 }
 
 impl Document {
@@ -163,6 +211,86 @@ impl Document {
         });
         // Success clears the error the previous run left behind.
         self.remove_nodes(&[NodeId::error_of(source)]);
+    }
+
+    /// Places or refreshes the chart of a result's rows.
+    ///
+    /// `createChart.ts`. The id is derived from the result's, so charting the same result twice
+    /// re-plots the node already on the canvas rather than stacking another one on top of it —
+    /// the rule `place_result` follows for the same reason.
+    ///
+    /// Returns the chart's id and whether it was newly created, or `None` when the result has no
+    /// rows to plot. Only a new node is worth flying the camera to.
+    pub fn place_chart(&mut self, result: &NodeId) -> Option<(NodeId, bool)> {
+        let rows = self.result(result)?;
+        if rows.is_empty() {
+            return None;
+        }
+        let series = chart_series(rows);
+        let id = NodeId::chart_of(result);
+        let existed = self.node(&id).is_some();
+        let placed = id.clone();
+        // Insert, connect and plot are one edit: undoing a chart should not leave an empty one.
+        self.transaction_of(EditKind::Structure, |document| {
+            document.place_chart_inner(result, (placed, existed), series);
+        });
+        Some((id, !existed))
+    }
+
+    fn place_chart_inner(
+        &mut self,
+        result: &NodeId,
+        placed: (NodeId, bool),
+        series: Vec<Map<String, Value>>,
+    ) {
+        let (id, existed) = placed;
+        if !existed {
+            let source = self.node(result);
+            let anchor = source.map_or_else(Point::default, |node| node.position);
+            let width = source
+                .and_then(|node| node.width)
+                .unwrap_or(DEFAULT_SOURCE_WIDTH)
+                .max(CHART_MIN_WIDTH);
+            // Above the result rather than beside it: a result is already flanked by its query on
+            // one side and whatever it was followed into on the other.
+            let origin = Point::new(anchor.x, anchor.y - CHART_HEIGHT - CHART_GAP);
+            let size = Size::new(width, CHART_HEIGHT);
+            self.insert_node(id.clone(), NodeType::Barchart, Rect::new(origin, size));
+            self.connect(result, &id);
+        }
+        self.update_data::<peek_document::BarChartData>(&id, |data| {
+            data.data = series;
+            // Only on creation: re-charting must not undo a switch to lines or an area.
+            if !existed {
+                data.chart_type = Some(peek_document::ChartType::Bar);
+            }
+        });
+    }
+
+    /// Spawns a variable node holding a value taken out of a result, wired to it.
+    ///
+    /// `createVariableFromCell` / `useColumnAsVariable`. Unlike [`Document::place_chart`] the id
+    /// is **not** derived from the result's: the reference mints a fresh node every time, so
+    /// charting twice re-plots one chart but using two cells as variables leaves two nodes.
+    ///
+    /// Insert, connect and fill are one edit, so undo never leaves an empty variable behind.
+    pub fn place_variable(&mut self, result: &NodeId, row: VariableRow) -> NodeId {
+        let source = self.node(result);
+        let anchor = source.map_or_else(Point::default, |node| node.position);
+        let width = source
+            .and_then(|node| node.width)
+            .unwrap_or(DEFAULT_SOURCE_WIDTH);
+        let origin = Point::new(anchor.x + width + VARIABLE_GAP, anchor.y);
+        let bounds = Rect::new(origin, NodeType::Variable.default_size());
+
+        self.transaction_of(EditKind::Structure, |document| {
+            let id = document.create_node(NodeType::Variable, bounds);
+            document.update_data::<VariableData>(&id, |data| {
+                data.rows = vec![row];
+            });
+            document.connect(result, &id);
+            id
+        })
     }
 
     /// Places or refreshes the `query-error` node for a failed run.
@@ -283,8 +411,23 @@ mod tests {
         VariableRow, VariableValue,
     };
 
-    use super::result_size;
+    use super::{chart_series, result_size};
     use crate::Document;
+
+    /// A result whose second column really holds numbers, so it can be charted.
+    fn plottable(count: usize) -> ResultSet {
+        ResultSet::new(
+            vec![Column::new("name", "TEXT"), Column::new("total", "INT8")],
+            (0..count)
+                .map(|index| {
+                    vec![
+                        Cell::Text(format!("row {index}")),
+                        Cell::Int(i64::try_from(index).unwrap()),
+                    ]
+                })
+                .collect(),
+        )
+    }
 
     fn rows(columns: &[(&str, &str)], count: usize) -> ResultSet {
         let columns: Vec<Column> = columns
@@ -525,5 +668,198 @@ mod tests {
     fn a_query_with_no_variable_sources_sees_nothing() {
         let (document, query) = with_query();
         assert!(document.variables_for(&query).is_empty());
+    }
+
+    /// Charting a result puts a chart above it, wired to it, holding its rows.
+    #[test]
+    fn charting_a_result_places_a_chart_above_it() {
+        let (mut document, query) = with_query();
+        let (result, _) = document.place_result(&query, ("a", 0), plottable(3));
+        let position = document.node(&result).unwrap().position;
+
+        let (chart, created) = document.place_chart(&result).expect("rows to plot");
+
+        assert!(created);
+        let node = document.node(&chart).unwrap();
+        assert_eq!(node.node_type(), Some(NodeType::Barchart));
+        assert!(
+            node.position.y < position.y,
+            "above the result, not beside it: {:?} against {position:?}",
+            node.position
+        );
+        assert!(
+            document
+                .edges()
+                .iter()
+                .any(|edge| edge.source == result && edge.target == chart)
+        );
+        let data = peek_document::BarChartData::get(&document.node(&chart).unwrap().kind).unwrap();
+        assert_eq!(data.data.len(), 3, "one entry per row");
+    }
+
+    /// The chart's id comes from the result's, so re-charting re-plots rather than stacking a
+    /// second node on the first.
+    #[test]
+    fn charting_twice_updates_the_same_node() {
+        let (mut document, query) = with_query();
+        let (result, _) = document.place_result(&query, ("a", 0), plottable(3));
+        let (first, _) = document.place_chart(&result).unwrap();
+
+        document.place_result(&query, ("a", 0), plottable(5));
+        let (second, created) = document.place_chart(&result).unwrap();
+
+        assert_eq!(first, second);
+        assert!(!created, "the node was already there");
+        let data = peek_document::BarChartData::get(&document.node(&second).unwrap().kind).unwrap();
+        assert_eq!(data.data.len(), 5, "and it re-plotted the new rows");
+    }
+
+    /// A re-chart must not undo a switch to lines: the type is the user's, the data is the
+    /// query's.
+    #[test]
+    fn re_charting_keeps_the_chart_type() {
+        let (mut document, query) = with_query();
+        let (result, _) = document.place_result(&query, ("a", 0), plottable(2));
+        let (chart, _) = document.place_chart(&result).unwrap();
+        document.update_data::<peek_document::BarChartData>(&chart, |data| {
+            data.chart_type = Some(peek_document::ChartType::Line);
+        });
+
+        document.place_chart(&result);
+
+        let data = peek_document::BarChartData::get(&document.node(&chart).unwrap().kind).unwrap();
+        assert_eq!(data.chart_type, Some(peek_document::ChartType::Line));
+    }
+
+    /// Placing the node, wiring it and plotting it is one edit: undo should not leave an empty
+    /// chart behind.
+    #[test]
+    fn charting_is_a_single_undo_step() {
+        let (mut document, query) = with_query();
+        let (result, _) = document.place_result(&query, ("a", 0), plottable(3));
+        let before = document.nodes().len();
+
+        let (chart, _) = document.place_chart(&result).unwrap();
+        assert!(document.node(&chart).is_some());
+
+        document.undo();
+        assert_eq!(document.nodes().len(), before);
+        assert!(document.node(&chart).is_none());
+    }
+
+    /// A variable spawned from a result sits beside it, wired to it, holding the value it was
+    /// made from.
+    #[test]
+    fn a_variable_is_placed_beside_the_result_that_made_it() {
+        let (mut document, query) = with_query();
+        let (result, _) = document.place_result(&query, ("a", 0), plottable(3));
+        let node = document.node(&result).unwrap();
+        let (position, width) = (node.position, node.width.unwrap());
+
+        let variable = document.place_variable(
+            &result,
+            VariableRow {
+                name: "name".to_string(),
+                value: VariableValue::One("Lola".to_string()),
+            },
+        );
+
+        let placed = document.node(&variable).unwrap();
+        assert_eq!(placed.node_type(), Some(NodeType::Variable));
+        assert!(
+            (placed.position.x - (position.x + width + 40.0)).abs() < f64::EPSILON,
+            "to the right of the result with a gap"
+        );
+        assert!(
+            document
+                .edges()
+                .iter()
+                .any(|edge| edge.source == result && edge.target == variable)
+        );
+        let data = VariableData::get(&placed.kind).unwrap();
+        assert_eq!(data.rows.len(), 1);
+        assert_eq!(data.rows[0].name, "name");
+        assert_eq!(
+            data.rows[0].value,
+            VariableValue::One("Lola".to_string()),
+            "a single cell keeps its raw value, unquoted"
+        );
+    }
+
+    /// The id is minted, not derived: two cells used as variables are two nodes, where charting
+    /// twice re-plots one chart.
+    #[test]
+    fn using_two_cells_as_variables_makes_two_nodes() {
+        let (mut document, query) = with_query();
+        let (result, _) = document.place_result(&query, ("a", 0), plottable(3));
+        let row = |name: &str| VariableRow {
+            name: name.to_string(),
+            value: VariableValue::One("x".to_string()),
+        };
+
+        let first = document.place_variable(&result, row("a"));
+        let second = document.place_variable(&result, row("b"));
+
+        assert_ne!(first, second);
+        assert!(document.node(&first).is_some() && document.node(&second).is_some());
+    }
+
+    /// Node, edge and value are one edit: undo must not leave an empty variable behind.
+    #[test]
+    fn placing_a_variable_is_a_single_undo_step() {
+        let (mut document, query) = with_query();
+        let (result, _) = document.place_result(&query, ("a", 0), plottable(2));
+        let before = document.nodes().len();
+
+        let variable = document.place_variable(
+            &result,
+            VariableRow {
+                name: "ids".to_string(),
+                value: VariableValue::Many(vec!["1".to_string(), "2".to_string()]),
+            },
+        );
+        assert!(document.node(&variable).is_some());
+
+        document.undo();
+        assert_eq!(document.nodes().len(), before);
+        assert!(document.node(&variable).is_none());
+    }
+
+    #[test]
+    fn a_result_with_no_rows_has_nothing_to_chart() {
+        let (mut document, query) = with_query();
+        let (result, _) = document.place_result(&query, ("a", 0), ResultSet::default());
+        assert!(document.place_chart(&result).is_none());
+    }
+
+    /// `buildChartData`'s two load-bearing rules: a NULL leaves the key out entirely, and a
+    /// numeric column that arrived as text is coerced so it plots as a series.
+    #[test]
+    fn chart_series_skips_nulls_and_coerces_numeric_text() {
+        let set = ResultSet::new(
+            vec![
+                Column::new("label", "TEXT"),
+                Column::new("amount", "NUMERIC"),
+                Column::new("missing", "INT4"),
+            ],
+            vec![vec![
+                Cell::Text("a".to_string()),
+                Cell::Text("12.5".to_string()),
+                Cell::Null,
+            ]],
+        );
+
+        let series = chart_series(&set);
+        let row = &series[0];
+        assert_eq!(
+            row.get("label").and_then(serde_json::Value::as_str),
+            Some("a")
+        );
+        assert_eq!(
+            row.get("amount").and_then(serde_json::Value::as_f64),
+            Some(12.5),
+            "NUMERIC rides as text to keep its precision, and plots as a number"
+        );
+        assert!(!row.contains_key("missing"), "a NULL contributes no key");
     }
 }

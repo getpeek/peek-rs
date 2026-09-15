@@ -47,10 +47,10 @@ pub(super) static ENTRIES: &[Command] = &[
     },
     Command {
         id: "Zoom::FitSelection",
-        title: "Fit selected nodes in view",
+        title: "Fit nodes to view",
         label: None,
         group: Group::Zoom,
-        keywords: "frame selection",
+        keywords: "fit nodes view zoom bsp tile layout fill viewport",
         default_keys: &[],
         context: CANVAS_NOT_TYPING,
         build: || Box::new(actions::zoom::FitSelection),

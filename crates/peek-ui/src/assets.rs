@@ -43,6 +43,12 @@ icon_assets!(
         Terminal,
         Key,
         X,
+        // The result node's toolbar.
+        ChartColumn,
+        Download,
+        Copy,
+        Search,
+        Rows3,
     ]
 );
 
@@ -63,5 +69,59 @@ impl AssetSource for Assets {
         paths.sort_unstable();
         paths.dedup();
         Ok(paths)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::AssetSource;
+    use gpui_kit::assets::IconName;
+
+    /// An icon whose embedded name and whose `IconName` disagree renders as **nothing**, with no
+    /// error anywhere — so every glyph Peek names is asserted to actually load.
+    #[test]
+    fn every_named_icon_resolves_to_bytes() {
+        let named = [
+            IconName::MousePointer2,
+            IconName::Code,
+            IconName::Sparkles,
+            IconName::Type,
+            IconName::AtSign,
+            IconName::Pencil,
+            IconName::Trash,
+            IconName::Brackets,
+            IconName::Lock,
+            IconName::LockOpen,
+            IconName::ChevronDown,
+            IconName::ChevronRight,
+            IconName::GitFork,
+            IconName::SendHorizontal,
+            IconName::Square,
+            IconName::Lightbulb,
+            IconName::DatabaseZap,
+            IconName::Bot,
+            IconName::TriangleAlert,
+            IconName::CircleCheck,
+            IconName::CircleDot,
+            IconName::Circle,
+            IconName::Wrench,
+            IconName::LoaderCircle,
+            IconName::ShieldAlert,
+            IconName::Terminal,
+            IconName::Key,
+            IconName::X,
+            IconName::ChartColumn,
+            IconName::Download,
+            IconName::Copy,
+            IconName::Search,
+            IconName::Rows3,
+        ];
+        for icon in named {
+            let path = icon.path();
+            assert!(
+                super::Assets.load(&path).is_ok_and(|bytes| bytes.is_some()),
+                "{path} is named but does not load"
+            );
+        }
     }
 }

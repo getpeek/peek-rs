@@ -83,7 +83,8 @@ impl CanvasView {
         self.start_layout(window, cx);
     }
 
-    /// `fitNodesToView.tsx`'s second command: frame the selection, then hold the camera there.
+    /// `fitNodesToView.tsx`'s second command: tile the selection across the viewport, then
+    /// hold the camera on it. The lock is set, never toggled, so a second press is a re-fit.
     fn fit_selection_and_lock(
         &mut self,
         _: &actions::zoom::FitSelectionAndLock,

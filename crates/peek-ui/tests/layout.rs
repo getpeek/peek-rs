@@ -166,25 +166,74 @@ fn viewing_the_schema_opens_the_page_it_is_built_on(cx: &mut TestAppContext) {
     });
 }
 
-/// `fitNodesToView.tsx`'s second command: frame the selection, then hold the camera there.
+/// `fitNodesToView.tsx`: the selection is *laid out* to fill the viewport, not framed by the
+/// camera. The node starts 9000 units away, so a camera-only implementation flies out to it and
+/// leaves it exactly where it was — which is what this used to assert and what it now catches.
 #[gpui_kit::test]
-fn fitting_the_selection_and_locking_frames_it_and_holds_the_camera(cx: &mut TestAppContext) {
+fn fitting_the_selection_tiles_it_across_the_viewport(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);
-    let initial = cx.update(|cx| workspace.read(cx).camera(cx));
+    let placed = place_text(cx, &workspace, Point::new(9000.0, 9000.0));
+    let before = bounds_of(cx, &workspace, &placed);
 
-    // Far enough from the fixture that no starting camera could already be framing it.
-    let placed = cx.update(|cx| {
+    dispatch(cx, handle, Box::new(actions::zoom::FitSelection));
+
+    let target = cx.update(|cx| workspace.read(cx).camera_target(cx));
+    assert!(
+        (target.zoom - 1.0).abs() < 1e-6,
+        "the camera goes to exactly 100%, not to whatever frames the node: {target:?}"
+    );
+
+    let after = bounds_of(cx, &workspace, &placed);
+    assert_ne!(before.origin, after.origin, "the node moved to the camera");
+    assert!(
+        after.size.width > before.size.width && after.size.height > before.size.height,
+        "and grew to fill the pane: {before:?} -> {after:?}"
+    );
+    let visible = target.visible_world_rect(peek_canvas::Size::new(1200.0, 800.0));
+    assert!(
+        visible.contains(after.min()) && visible.contains(after.max()),
+        "the tiled node is in frame: {after:?} in {visible:?}"
+    );
+}
+
+/// Two nodes take the two halves of a split along the pane's longer axis, one `FIT_GAP` apart.
+#[gpui_kit::test]
+fn fitting_two_nodes_tiles_them_side_by_side(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let left = place_text(cx, &workspace, Point::new(9000.0, 9000.0));
+    let right = place_text(cx, &workspace, Point::new(9400.0, 9000.0));
+    cx.update(|cx| {
         let document = workspace.read(cx).document(cx);
         document.update(cx, |document, cx| {
-            let id = document.create_node(
-                NodeType::Text,
-                Rect::new(Point::new(9000.0, 9000.0), WorldSize::new(280.0, 140.0)),
-            );
-            document.select_only([id.clone()]);
+            document.select_only([left.clone(), right.clone()]);
             cx.notify();
-            id
-        })
+        });
     });
+
+    dispatch(cx, handle, Box::new(actions::zoom::FitSelection));
+
+    let (first, second) = (
+        bounds_of(cx, &workspace, &left),
+        bounds_of(cx, &workspace, &right),
+    );
+    assert!(!first.intersects(second), "{first:?} overlaps {second:?}");
+    assert!(
+        (first.size.height - second.size.height).abs() < 0.001
+            && (first.size.width - second.size.width).abs() < 0.001,
+        "equal halves: {first:?} and {second:?}"
+    );
+    assert!(
+        (second.origin.x - first.max().x - 16.0).abs() < 0.001,
+        "one FIT_GAP between them: {first:?} then {second:?}"
+    );
+}
+
+/// The lock variant runs the same fit and then holds the camera there.
+#[gpui_kit::test]
+fn fitting_the_selection_and_locking_lays_it_out_and_holds_the_camera(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let placed = place_text(cx, &workspace, Point::new(9000.0, 9000.0));
+    let before = bounds_of(cx, &workspace, &placed);
 
     dispatch(cx, handle, Box::new(actions::zoom::FitSelectionAndLock));
 
@@ -192,19 +241,36 @@ fn fitting_the_selection_and_locking_frames_it_and_holds_the_camera(cx: &mut Tes
         cx.update(|cx| workspace.read(cx).is_camera_locked(cx)),
         "the camera is locked, not toggled"
     );
-    let target = cx.update(|cx| workspace.read(cx).camera_target(cx));
-    assert!(!target.approx_eq(initial), "and it framed the selection");
-    cx.update(|cx| {
-        let document = workspace.read(cx).document(cx);
-        let bounds = document.read(cx).bounds_of([&placed]).unwrap();
-        let visible = target.visible_world_rect(peek_canvas::Size::new(1200.0, 800.0));
-        assert!(
-            visible.contains(bounds.min()) && visible.contains(bounds.max()),
-            "the selected node is in frame: {bounds:?} in {visible:?}"
-        );
-    });
+    assert_ne!(
+        before,
+        bounds_of(cx, &workspace, &placed),
+        "and the node was laid out"
+    );
 
     // A second press must leave it locked: the reference sets the lock, it does not flip it.
     dispatch(cx, handle, Box::new(actions::zoom::FitSelectionAndLock));
     assert!(cx.update(|cx| workspace.read(cx).is_camera_locked(cx)));
+}
+
+/// A Text node placed far from the fixture and left as the only selection, so no starting
+/// camera could already be framing it and nothing else competes for a tile.
+fn place_text(cx: &mut TestAppContext, workspace: &Entity<WorkspaceView>, at: Point) -> NodeId {
+    cx.update(|cx| {
+        let document = workspace.read(cx).document(cx);
+        document.update(cx, |document, cx| {
+            let id =
+                document.create_node(NodeType::Text, Rect::new(at, WorldSize::new(280.0, 140.0)));
+            document.select_only([id.clone()]);
+            cx.notify();
+            id
+        })
+    })
+}
+
+fn bounds_of(cx: &mut TestAppContext, workspace: &Entity<WorkspaceView>, id: &NodeId) -> Rect {
+    cx.update(|cx| {
+        let document = workspace.read(cx).document(cx);
+        let document = document.read(cx);
+        document.node(id).expect("still on the page").bounds()
+    })
 }

@@ -13,6 +13,27 @@ Key operations (all pure, unit-tested in `camera.rs`):
   Peek always caps fit at `max_zoom: 1`.
 - `visible_world_rect(pane)` drives culling.
 
+## Fitting
+
+Three commands say "fit" and only two of them are camera moves.
+
+- `Zoom::FitView` (`cmd-shift-0`) frames every node on the page — `content_bounds` through
+  `fit_bounds`, capped at 100%.
+- `Zoom::FitSelection` ("Fit nodes to view") is **a layout, not a camera move**: it tiles the
+  selected nodes across the pane and then puts the camera at exactly 100% over the point it was
+  already looking at. It is the only zoom command that writes to the document.
+- `Zoom::FitSelectionAndLock` is that, then the camera lock — set, never toggled.
+
+The tiling is `peek_canvas::layout::bsp`, a port of `bspTiles.ts`: recursively split the region
+along its longer axis, `ceil(count / 2)` tiles to the first half, one `FIT_GAP` (16) out of the
+axis per split and `FIT_PADDING` (24) around the whole layout. Tiles are handed out in **page
+order**, matching `rf.getNodes()` — not the sorted order `Document::selected` keeps ids in.
+
+Two deliberate divergences from the reference. Tiles are clamped to `NodeType::min_size()`,
+because `set_bounds` clamps and a twenty-node selection is better as overlapping readable cards
+than as slivers below their own resize minimums. And `title_bar::HEIGHT` stands in for the
+hardcoded `TITLEBAR_HEIGHT = 50`, so a fit with the chrome hidden uses the whole window.
+
 "Screen" in the camera is **pane space** (the canvas element's own coordinates). The view stores
 the pane's window bounds (`pane_bounds`, written by the element every prepaint) and subtracts the
 origin from window-space pointer positions before feeding the reducer.
@@ -326,13 +347,32 @@ finished; the Text node already uses it for its auto-grow. The test that pins it
 because every editing path bails before the read without one — which is why the hermetic suite
 could not have caught it first time, and why `Database::mark_connected_for_test` exists.
 
-**Overlays lay out outside the rem scope.** Anything gpui renders in the window overlay —
-popovers, tooltips, menus — is laid out at rem 1 whatever the camera is doing, because the rem
-scope only wraps the node's own element tree. A popover is therefore not usable as part of a
-node's UI (the Variable node expands its list editor inline instead); a tooltip is defensible,
-being chrome *about* the node rather than part of it, but it will not scale with the node it
-describes. Where a tooltip carries information, put the same text in an `aria_label` so dropping
-it later costs nothing.
+**Where an overlay lays out depends on where it was raised, and the old note here had it
+backwards.** `Window::defer_draw` captures `rem_size` and both deferred passes re-enter
+`with_rem_size`, so a `deferred` draw raised from **inside** a node body inherits
+`BASE_REM * zoom` and scales with the camera — `node/query/mod.rs` found that by having to
+hand-scale the completion popover's `max_width`. One raised **outside** the node tree, as a
+sibling of `CanvasElement`, is rem 1 and does not scale; that is what the jump badges, the
+page-search panel and the right-click menu are.
+
+It is also **not** clipped by the node body's `overflow_hidden`: `deferred()` passes
+`content_mask: None` and `with_content_mask(None)` is a no-op in gpui-pre 0.3.4. The earlier
+claim that it was is why the value pane and the Variable list editor are inline; that conclusion
+still stands, but on the scaling argument alone.
+
+So the question to ask is not "can it be an overlay" but **is it content or chrome**. A pane
+explaining a cell belongs to its node and should scale with it, so it goes inline. A context
+menu, a tooltip, a tool palette does not — the palette and the zoom cluster are already pinned in
+pixels — so it goes on the canvas, outside the rem scope. Where a tooltip carries information,
+put the same text in an `aria_label` so dropping it later costs nothing.
+
+**Right-click is the node's to claim.** The canvas parks a right press in `PendingPress` and
+`on_up` bails for any non-left button, so a stationary right-click does nothing to it; only a
+right *drag* pans. But `DataTable` attaches its own `ContextMenu` to the element wrapping every
+row and registers that window listener **after** painting its children, so it is dispatched
+*before* them — a cell's own handler can neither beat it nor `stop_propagation` it. The Result
+node takes the press on a transparent sibling painted after the table, which registers later
+still; see `node/result/mod.rs`, `right_press_catcher`.
 
 Escape is worth knowing about too: it is `Tool::Select`, bound on `"Canvas"` even while typing,
 and gpui dispatches bound actions *before* any key listener, capture phase included — so no node

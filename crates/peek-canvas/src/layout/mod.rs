@@ -10,9 +10,14 @@
 //! Pure maths, so it lives here rather than in the view: a run is deterministic given its
 //! starting positions, which is what makes it testable with `cargo test -p peek-canvas`.
 //! [`crate::layout::random`] explains why even the jiggle is reproducible.
+//!
+//! [`bsp`] is the other layout on this page: the one-shot viewport tiling behind
+//! `Zoom::FitSelection`, which shares nothing with the simulation but the module.
 
 mod anchors;
 mod random;
+
+pub mod bsp;
 pub mod schema;
 
 use peek_document::geometry::Point;

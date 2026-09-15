@@ -81,7 +81,11 @@ pub fn filename(sql: &str, extension: &str) -> String {
 ///
 /// Trimming before the cut is the reference's order, so a slug may still end in `_` when the
 /// cut lands mid-separator.
-fn slug(sql: &str) -> String {
+///
+/// Public because the context menus name their exports after the scope as well as the query
+/// (`orders-3-rows.csv`), so they need the base without an extension on it.
+#[must_use]
+pub fn slug(sql: &str) -> String {
     let mut collapsed = String::with_capacity(sql.len());
     let mut in_separator = false;
     for character in sql.to_lowercase().chars() {

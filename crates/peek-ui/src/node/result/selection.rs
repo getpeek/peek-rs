@@ -17,11 +17,11 @@ use peek_document::ResultSet;
 
 /// An inclusive rectangle of cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct CellRect {
-    pub(super) top: usize,
-    pub(super) bottom: usize,
-    pub(super) left: usize,
-    pub(super) right: usize,
+pub(crate) struct CellRect {
+    pub(crate) top: usize,
+    pub(crate) bottom: usize,
+    pub(crate) left: usize,
+    pub(crate) right: usize,
 }
 
 impl CellRect {
@@ -34,7 +34,37 @@ impl CellRect {
         }
     }
 
-    pub(super) fn contains(self, row: usize, column: usize) -> bool {
+    /// The single cell at `(row, column)`.
+    pub(super) fn cell(row: usize, column: usize) -> Self {
+        Self {
+            top: row,
+            bottom: row,
+            left: column,
+            right: column,
+        }
+    }
+
+    /// A whole row across `columns` columns.
+    pub(super) fn row(row: usize, columns: usize) -> Self {
+        Self {
+            top: row,
+            bottom: row,
+            left: 0,
+            right: columns.saturating_sub(1),
+        }
+    }
+
+    /// A whole column down `rows` rows.
+    pub(super) fn column(column: usize, rows: usize) -> Self {
+        Self {
+            top: 0,
+            bottom: rows.saturating_sub(1),
+            left: column,
+            right: column,
+        }
+    }
+
+    pub(crate) fn contains(self, row: usize, column: usize) -> bool {
         (self.top..=self.bottom).contains(&row) && (self.left..=self.right).contains(&column)
     }
 
@@ -46,13 +76,50 @@ impl CellRect {
         self.left..=self.right
     }
 
-    pub(super) fn area(self) -> usize {
+    pub(crate) fn area(self) -> usize {
         (self.bottom - self.top + 1) * (self.right - self.left + 1)
+    }
+
+    /// Which sides of this rectangle the cell at `(row, column)` sits on, or no edges at all when
+    /// it is outside. `rectEdges` in `ResultTableRow.tsx`: an interior cell gets none, so drawing
+    /// one border per flagged side traces the whole rectangle and nothing inside it.
+    pub(super) fn edges(self, row: usize, column: usize) -> Edges {
+        if !self.contains(row, column) {
+            return Edges::default();
+        }
+        Edges {
+            top: row == self.top,
+            bottom: row == self.bottom,
+            left: column == self.left,
+            right: column == self.right,
+        }
+    }
+}
+
+/// The sides of a selection a single cell lies on.
+///
+/// Four booleans because four borders: they are one flag per side of one box, not four
+/// independent modes, and naming them is what keeps `sel-top` readable as `sel-top`.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "one flag per border side of a single cell"
+)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Edges {
+    pub(super) top: bool,
+    pub(super) bottom: bool,
+    pub(super) left: bool,
+    pub(super) right: bool,
+}
+
+impl Edges {
+    pub(super) fn any(self) -> bool {
+        self.top || self.bottom || self.left || self.right
     }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct Selection {
+pub(crate) struct Selection {
     cells: Option<Cells>,
     rows: Rows,
 }
@@ -79,12 +146,12 @@ impl Selection {
         self.cells.is_none() && self.rows.selected.is_empty()
     }
 
-    pub(super) fn rect(&self) -> Option<CellRect> {
+    pub(crate) fn rect(&self) -> Option<CellRect> {
         self.cells
             .map(|cells| CellRect::between(cells.anchor, cells.focus))
     }
 
-    pub(super) fn selected_rows(&self) -> &BTreeSet<usize> {
+    pub(crate) fn selected_rows(&self) -> &BTreeSet<usize> {
         &self.rows.selected
     }
 
@@ -96,16 +163,33 @@ impl Selection {
         self.rect().is_some_and(|rect| rect.contains(row, column))
     }
 
-    /// Whether a selected row is at the top or bottom edge of its band, which is what lets the
-    /// outline be drawn around a run of rows rather than around each one.
-    pub(super) fn band_edges(&self, row: usize) -> (bool, bool) {
+    /// Which sides of a row band the cell at `(row, column)` sits on.
+    ///
+    /// A band spans the full width, so the first and last column are always its left and right
+    /// edges; top and bottom are only edges where the neighbouring row is *not* selected, which
+    /// is what draws a run of rows as one rounded rectangle and two disjoint rows as two
+    /// (`useRowSelection.ts`'s `bandEdges`, applied in `ResultTableRow.tsx`).
+    pub(super) fn band_edges(&self, row: usize, column: usize, columns: usize) -> Edges {
         if !self.is_row_selected(row) {
-            return (false, false);
+            return Edges::default();
         }
-        let above = row
-            .checked_sub(1)
-            .is_none_or(|previous| !self.is_row_selected(previous));
-        (above, !self.is_row_selected(row + 1))
+        Edges {
+            top: row
+                .checked_sub(1)
+                .is_none_or(|previous| !self.is_row_selected(previous)),
+            bottom: !self.is_row_selected(row + 1),
+            left: column == 0,
+            right: column + 1 >= columns,
+        }
+    }
+
+    /// Which sides of whichever selection is live the cell sits on: the rectangle's, or the row
+    /// band's. The two are mutually exclusive, so at most one can answer.
+    pub(super) fn edges(&self, row: usize, column: usize, columns: usize) -> Edges {
+        if let Some(rect) = self.rect() {
+            return rect.edges(row, column);
+        }
+        self.band_edges(row, column, columns)
     }
 
     /// Clears everything. Escape does this, and so does any change to the rows, because a
@@ -396,14 +480,27 @@ mod tests {
         selection.drag_to_cell(3, 0);
         selection.release();
 
-        assert_eq!(selection.band_edges(1), (true, false), "top of the band");
-        assert_eq!(selection.band_edges(2), (false, false), "inside it");
-        assert_eq!(selection.band_edges(3), (false, true), "bottom of the band");
-        assert_eq!(
-            selection.band_edges(0),
-            (false, false),
-            "not selected at all"
-        );
+        let vertical = |row| {
+            let edges = selection.band_edges(row, 0, 3);
+            (edges.top, edges.bottom)
+        };
+        assert_eq!(vertical(1), (true, false), "top of the band");
+        assert_eq!(vertical(2), (false, false), "inside it");
+        assert_eq!(vertical(3), (false, true), "bottom of the band");
+        assert_eq!(vertical(0), (false, false), "not selected at all");
+    }
+
+    /// A band spans the table, so the outer columns are always its sides however tall it is.
+    #[test]
+    fn a_band_is_bounded_left_and_right_by_the_outer_columns() {
+        let mut selection = Selection::default();
+        selection.press_cell(1, 0, true);
+        selection.release();
+
+        assert!(selection.band_edges(1, 0, 3).left, "first column");
+        assert!(selection.band_edges(1, 2, 3).right, "last column");
+        let middle = selection.band_edges(1, 1, 3);
+        assert!(!middle.left && !middle.right, "and nothing between them");
     }
 
     /// The first row has nothing above it, so it is always a top edge.
@@ -412,7 +509,28 @@ mod tests {
         let mut selection = Selection::default();
         selection.press_cell(0, 0, true);
         selection.release();
-        assert_eq!(selection.band_edges(0), (true, true));
+        let edges = selection.band_edges(0, 0, 1);
+        assert_eq!((edges.top, edges.bottom), (true, true));
+    }
+
+    /// Only the perimeter of a rectangle is flagged, which is what keeps the outline an outline.
+    #[test]
+    fn a_rectangle_flags_its_perimeter_and_nothing_inside_it() {
+        let mut selection = Selection::default();
+        selection.press_cell(1, 1, false);
+        selection.drag_to_cell(3, 3);
+
+        let corner = selection.edges(1, 1, 5);
+        assert_eq!(
+            (corner.top, corner.left, corner.bottom, corner.right),
+            (true, true, false, false),
+            "the top-left corner owns two sides"
+        );
+        assert!(
+            !selection.edges(2, 2, 5).any(),
+            "an interior cell owns none"
+        );
+        assert!(!selection.edges(4, 4, 5).any(), "and an outside one none");
     }
 
     #[test]

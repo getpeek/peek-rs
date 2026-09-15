@@ -11,7 +11,7 @@ use std::fmt;
 
 use crate::engine::Engine;
 use peek_document as sql_type;
-use peek_document::Cell;
+use peek_document::{Cell, ResultSet};
 
 /// Why a result cannot be edited in place.
 ///
@@ -217,6 +217,45 @@ pub fn build_delete(
     ))
 }
 
+/// One `INSERT INTO <table> (…) VALUES (…);` per row, joined by newlines.
+///
+/// `toSqlInserts.ts`: what "copy these rows as SQL" produces. Unlike the update and delete
+/// builders this needs no primary key and cannot fail — it describes rows rather than finding
+/// them, so there is no `WHERE` to get wrong.
+///
+/// Every identifier goes through [`Engine::quote_identifier`] and every value through
+/// [`format_cell_literal`], so a table called `order` parses and a value holding an apostrophe
+/// cannot end the literal early.
+#[must_use]
+pub fn build_insert(engine: Engine, table: &str, rows: &ResultSet) -> String {
+    let quoted_table = engine.quote_identifier(table);
+    let columns = rows
+        .columns()
+        .iter()
+        .map(|column| engine.quote_identifier(&column.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    (0..rows.row_count())
+        .map(|row| {
+            let values = rows
+                .columns()
+                .iter()
+                .enumerate()
+                .map(|(index, column)| {
+                    rows.cell(row, index).map_or_else(
+                        || "NULL".to_string(),
+                        |cell| format_cell_literal(cell, &column.sql_type, engine),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("INSERT INTO {quoted_table} ({columns}) VALUES ({values});")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn literal_for(row: &[KeyBinding], column: &str) -> Result<String, NotEditable> {
     row.iter()
         .find(|key| key.column == column)
@@ -229,10 +268,11 @@ fn literal_for(row: &[KeyBinding], column: &str) -> Result<String, NotEditable> 
 #[cfg(test)]
 mod tests {
     use super::{
-        KeyBinding, NotEditable, build_delete, build_update, format_cell_literal, format_literal,
+        KeyBinding, NotEditable, build_delete, build_insert, build_update, format_cell_literal,
+        format_literal,
     };
     use crate::engine::Engine;
-    use peek_document::Cell;
+    use peek_document::{Cell, Column, ResultSet};
 
     fn key(column: &str, literal: &str) -> KeyBinding {
         KeyBinding {
@@ -426,5 +466,58 @@ mod tests {
         )
         .unwrap();
         assert!(sql.starts_with(r#"UPDATE "users""; drop table x; --" SET "#));
+    }
+
+    fn two_rows() -> ResultSet {
+        ResultSet::new(
+            vec![Column::new("id", "INT4"), Column::new("name", "TEXT")],
+            vec![
+                vec![Cell::Int(1), Cell::Text("Lola".to_string())],
+                vec![Cell::Int(2), Cell::Null],
+            ],
+        )
+    }
+
+    #[test]
+    fn insert_writes_one_statement_per_row() {
+        let sql = build_insert(Engine::Postgres, "users", &two_rows());
+        assert_eq!(
+            sql,
+            "INSERT INTO \"users\" (\"id\", \"name\") VALUES (1, 'Lola');\n\
+             INSERT INTO \"users\" (\"id\", \"name\") VALUES (2, NULL);"
+        );
+    }
+
+    /// A table or column named after a keyword has to survive the round trip, which is the whole
+    /// reason identifiers go through the engine rather than being interpolated.
+    #[test]
+    fn insert_quotes_a_keyword_table_and_column() {
+        let rows = ResultSet::new(vec![Column::new("order", "INT4")], vec![vec![Cell::Int(7)]]);
+        let sql = build_insert(Engine::Postgres, "order", &rows);
+        assert_eq!(sql, "INSERT INTO \"order\" (\"order\") VALUES (7);");
+
+        let mysql = build_insert(Engine::MySql, "order", &rows);
+        assert_eq!(mysql, "INSERT INTO `order` (`order`) VALUES (7);");
+    }
+
+    /// The `follow.rs` rule: a value cannot end its own literal and continue as SQL.
+    #[test]
+    fn insert_cannot_be_broken_out_of_by_a_value() {
+        let rows = ResultSet::new(
+            vec![Column::new("name", "TEXT")],
+            vec![vec![Cell::Text("o'brien'); drop table x --".to_string())]],
+        );
+        let sql = build_insert(Engine::Postgres, "t", &rows);
+        assert_eq!(
+            sql, "INSERT INTO \"t\" (\"name\") VALUES ('o''brien''); drop table x --');",
+            "the apostrophes are doubled, so the whole thing stays one literal"
+        );
+    }
+
+    /// An empty result has nothing to insert, and must not produce a statement with no values.
+    #[test]
+    fn insert_of_no_rows_is_empty() {
+        let rows = ResultSet::new(vec![Column::new("id", "INT4")], Vec::new());
+        assert!(build_insert(Engine::Postgres, "t", &rows).is_empty());
     }
 }

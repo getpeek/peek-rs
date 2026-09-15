@@ -83,7 +83,22 @@ pub mod query {
 /// Result-node commands.
 pub mod result {
     use super::actions;
-    actions!(Result, [Pivot]);
+    actions!(
+        Result,
+        [
+            Pivot,
+            Chart,
+            CopyValue,
+            CopyAsJson,
+            CopyAsCsv,
+            CopyAsSql,
+            ExportAsJson,
+            ExportAsCsv,
+            ExportAsSql,
+            UseAsVariable,
+            DeleteRows
+        ]
+    );
 }
 
 /// Agent-node commands. `CycleMode` and `Stop` fire while the composer holds focus, which is

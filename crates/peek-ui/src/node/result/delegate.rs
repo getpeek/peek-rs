@@ -22,14 +22,26 @@ use peek_theme::ActivePeekTheme;
 
 use super::cells;
 use super::column_roles::{ColumnRole, Role};
+use super::menu::scope::MenuTarget;
+use super::outline::{self, Outline};
 use super::search::Matches;
-use super::selection::Selection;
+use super::selection::{CellRect, Selection};
 use super::widths::ColumnWidths;
 
 /// World-unit row height. `ROW_HEIGHT` in `ResultTable.tsx`, where it is only the virtualiser's
 /// estimate because rows there are measured; here it is the height, because `uniform_list`
 /// requires every row to be identical.
 pub(super) const ROW_HEIGHT: f64 = 34.0;
+
+/// World-unit cell padding, from `Result.css`: `7px 14px` on a `td`, `9px 14px` on a `th`.
+///
+/// gpui-component pads the cell container itself, which would leave the gutters between two
+/// selected cells unpainted and break the outline into segments. The columns ask for no padding
+/// at all (`Column::p_0`) and the delegate applies it inside the element it owns instead — in
+/// world units, so unlike the crate's fixed pixels it scales with the camera the way the row
+/// height already does.
+const CELL_PADDING: (f64, f64) = (7.0, 14.0);
+const HEADER_PADDING: (f64, f64) = (9.0, 14.0);
 
 pub(crate) struct ResultDelegate {
     /// Shared with the sidecar rather than copied: the canvas hands this over on every frame,
@@ -57,6 +69,16 @@ pub(crate) struct ResultDelegate {
     /// rather than read from the node's data on every call because every index in the
     /// `TableDelegate` impl means something different depending on it.
     pivoted: bool,
+    /// What a press where the pointer is would select, drawn as a dashed preview
+    /// (`useGhostSelection.ts`). `None` while the preview is suppressed, or once the pointer has
+    /// left the table.
+    ghost: Option<CellRect>,
+    /// Where the right-click that opened the context menu landed, cleared when it closes.
+    /// The menu acts on this rather than on the selection, which a right press never touches.
+    menu_target: Option<MenuTarget>,
+    /// The cell or header the pointer is over, kept so the body's right-press catcher knows what
+    /// was clicked without repeating the table's column and row arithmetic.
+    hovered: Option<MenuTarget>,
     /// The cell whose full value the detail pane is showing.
     detail: Option<(usize, usize)>,
     /// The cell being edited, by **data** row and column, with whatever the last commit said.
@@ -128,6 +150,9 @@ impl ResultDelegate {
             matches: Matches::unfiltered(row_count),
             roles: Vec::new(),
             pivoted: false,
+            ghost: None,
+            hovered: None,
+            menu_target: None,
             detail: None,
             editing: None,
             input,
@@ -140,7 +165,7 @@ impl ResultDelegate {
         self.owner = Some(owner);
     }
 
-    fn owner(&self) -> Option<Entity<super::ResultTable>> {
+    pub(super) fn owner(&self) -> Option<Entity<super::ResultTable>> {
         self.owner.as_ref()?.upgrade()
     }
 
@@ -305,6 +330,7 @@ impl ResultDelegate {
     pub(super) fn set_matches(&mut self, matches: Matches) {
         self.matches = matches;
         self.selection.clear();
+        self.ghost = None;
     }
 
     /// The data row behind a display position.
@@ -369,6 +395,7 @@ impl ResultDelegate {
             // A position only means something against the ordering it was captured in, so new
             // rows drop both the selection and any search.
             self.selection.clear();
+            self.ghost = None;
             self.matches = Matches::unfiltered(self.rows.row_count());
             self.detail = None;
             self.editing = None;
@@ -387,6 +414,12 @@ impl ResultDelegate {
         self.scale
     }
 
+    /// How many rows the table is showing. Not the result's row count: a search filters the
+    /// display, and a column selection has to stop at the last row actually on screen.
+    pub(super) fn visible_rows(&self) -> usize {
+        self.matches.len()
+    }
+
     pub(super) fn column_names(&self) -> impl Iterator<Item = &str> {
         self.rows
             .columns()
@@ -400,6 +433,121 @@ impl ResultDelegate {
             reason = "a column width in pixels is far inside f32"
         )]
         px((world * self.scale) as f32)
+    }
+
+    /// The dashed preview of what pressing here would select, or `None` when there is nothing to
+    /// preview. `useGhostSelection.ts`: a header ghosts its whole column, shift ghosts the whole
+    /// row, and a plain hover ghosts the one cell — but never while a button is down, never while
+    /// cmd/ctrl turns the drag into a node move, and never over a cell already selected, where
+    /// the preview would only blur the selection it sits on.
+    fn ghost_for(&self, at: (usize, usize), modifiers: gpui_kit::Modifiers) -> Option<CellRect> {
+        if modifiers.secondary() {
+            return None;
+        }
+        let (row, column) = at;
+        let rect = if modifiers.shift {
+            CellRect::row(row, self.columns_count_now())
+        } else {
+            CellRect::cell(row, column)
+        };
+        (!self.selection.contains_cell(row, column)).then_some(rect)
+    }
+
+    /// The whole column, as hovering or pressing a header takes it.
+    fn ghost_column(&self, column: usize, modifiers: gpui_kit::Modifiers) -> Option<CellRect> {
+        (!modifiers.secondary()).then(|| CellRect::column(column, self.matches.len()))
+    }
+
+    pub(super) fn menu_target(&self) -> Option<MenuTarget> {
+        self.menu_target
+    }
+
+    /// What the pointer is over, which a right press turns into a menu target.
+    pub(super) fn hovered(&self) -> Option<MenuTarget> {
+        self.hovered
+    }
+
+    fn set_hovered(&mut self, hovered: Option<MenuTarget>) {
+        self.hovered = hovered;
+    }
+
+    pub(super) fn set_menu_target(&mut self, target: Option<MenuTarget>) {
+        self.menu_target = target;
+    }
+
+    /// Drops the preview outright, for a caller that only knows the pointer has gone.
+    pub(super) fn clear_ghost(&mut self) -> bool {
+        self.hovered = None;
+        self.set_ghost(None)
+    }
+
+    /// Adopts a ghost only when it actually moved: a mouse move fires many times a second, and
+    /// notifying on each one would repaint the whole node for nothing.
+    fn set_ghost(&mut self, ghost: Option<CellRect>) -> bool {
+        let changed = self.ghost != ghost;
+        self.ghost = ghost;
+        changed
+    }
+
+    /// How many columns the table is showing right now, which the record view transposes.
+    fn columns_count_now(&self) -> usize {
+        if self.pivoted {
+            1 + self.matches.len()
+        } else {
+            self.rows.column_count()
+        }
+    }
+
+    /// The two outlines a cell may carry: the live selection, and under it the dashed preview.
+    /// Ordered so a solid edge wins wherever they overlap, which is what the `::after` over
+    /// `::before` stacking buys in the stylesheet.
+    fn outlines(&self, row: usize, column: usize, cx: &App) -> Vec<gpui_kit::AnyElement> {
+        let columns = self.columns_count_now();
+        let ghost = self
+            .ghost
+            .map(|rect| rect.edges(row, column))
+            .unwrap_or_default();
+        [
+            outline::overlay(Outline::Ghost, ghost, cx),
+            outline::overlay(
+                Outline::Selected,
+                self.selection.edges(row, column, columns),
+                cx,
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// A cell whose column really references another table is a link: pressing it claims the
+    /// press so the table does not also start a selection, which is the rule `useCellSelection`
+    /// follows for `.reference--link`.
+    fn link_cell(
+        &self,
+        at: (usize, usize),
+        value: (usize, &peek_document::Cell),
+        cx: &mut Context<TableState<Self>>,
+    ) -> gpui_kit::AnyElement {
+        let (row_ix, col_ix) = at;
+        let (row, value) = value;
+        div()
+            .id(("result-link", row_ix * 1000 + col_ix))
+            // Fills the cell, so the whole value is the target rather than whatever width the
+            // text happens to take.
+            .size_full()
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+            )
+            .on_click(cx.listener(move |table, _, window, cx| {
+                table
+                    .delegate_mut()
+                    .follow_reference(row, col_ix, window, cx);
+            }))
+            .child(cells::cell(value, self.role(col_ix), cx))
+            .into_any_element()
     }
 }
 
@@ -433,6 +581,10 @@ impl TableDelegate for ResultDelegate {
             .resizable(true)
             // The reference has no sorting or reordering: clicking a header selects the column.
             .movable(false)
+            // The delegate pads its own element instead (see `CELL_PADDING`), so a cell's
+            // background and its selection outline reach the column's real edges and a press
+            // anywhere in the header — padding included — lands on a handler that wants it.
+            .p_0()
             .min_width(px(40.0))
     }
 
@@ -443,34 +595,39 @@ impl TableDelegate for ResultDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         if self.pivoted {
-            return Self::pivot_th(col_ix, cx);
+            return self.pivot_th(col_ix, cx);
         }
         let Some(column) = self.rows.columns().get(col_ix) else {
             return div().into_any_element();
         };
-        let selected = self
-            .selection
-            .rect()
-            .is_some_and(|rect| rect.columns().contains(&col_ix));
-        let theme = cx.peek_theme();
-        let background = if selected {
-            theme.row_selected_bg
-        } else {
-            theme.node_bg
-        };
-        let rows = self.rows.row_count();
+        // The reference gives a `th` no selected state: only the cells under it change, so the
+        // header never disagrees with the outline drawn around the column.
         let role = self.role(col_ix);
+        let (vertical, horizontal) = HEADER_PADDING;
 
         div()
             .id(("result-th", col_ix))
             .size_full()
-            .bg(background)
+            .py(self.pixels(vertical))
+            .px(self.pixels(horizontal))
+            // `thead th { cursor: pointer }`: a header selects its column, and nothing else in
+            // the table says so. The tint lands on the name rather than the cell, so the group.
+            .cursor_pointer()
+            .group(cells::HEADER_GROUP)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |table, event: &MouseDownEvent, _, cx| {
+                cx.listener(move |table, event: &MouseDownEvent, window, cx| {
                     if event.modifiers.secondary() {
                         return;
                     }
+                    // The node body clears the selection on any press that is not on a cell, so
+                    // without claiming this one the column would be selected and wiped by the
+                    // same event — which is exactly how headers came to look unclickable.
+                    cx.stop_propagation();
+                    // And pressing a header focuses the table for the same reason pressing a
+                    // cell does: `escape` and `cmd-c` dispatch outward from whatever has focus.
+                    window.focus(&table.focus_handle(cx), cx);
+                    let rows = table.delegate().visible_rows();
                     table
                         .delegate_mut()
                         .selection_mut()
@@ -480,8 +637,19 @@ impl TableDelegate for ResultDelegate {
             )
             .on_mouse_move(cx.listener(move |table, event: &MouseMoveEvent, _, cx| {
                 if event.pressed_button != Some(MouseButton::Left) {
+                    table.delegate_mut().set_hovered(Some(MenuTarget {
+                        row: 0,
+                        position: 0,
+                        column: col_ix,
+                        header: true,
+                    }));
+                    let ghost = table.delegate().ghost_column(col_ix, event.modifiers);
+                    if table.delegate_mut().set_ghost(ghost) {
+                        cx.notify();
+                    }
                     return;
                 }
+                let rows = table.delegate().visible_rows();
                 table
                     .delegate_mut()
                     .selection_mut()
@@ -509,31 +677,25 @@ impl TableDelegate for ResultDelegate {
             return div().into_any_element();
         };
         let matched = self.matches.cell(row, col_ix).is_some();
-        let sql_type = self
-            .rows
-            .columns()
-            .get(col_ix)
-            .map_or(String::new(), |column| column.sql_type.clone());
 
         let in_rect = self.selection.contains_cell(row_ix, col_ix);
         let in_row = self.selection.is_row_selected(row_ix);
-        let (band_top, band_bottom) = self.selection.band_edges(row_ix);
         let theme = cx.peek_theme();
+        let (vertical, horizontal) = CELL_PADDING;
 
-        let mut cell = div().id(("result-td", row_ix * 1000 + col_ix)).size_full();
+        let mut cell = div()
+            .id(("result-td", row_ix * 1000 + col_ix))
+            .size_full()
+            // The outlines below are absolute children, so the cell has to be their frame.
+            .relative()
+            .py(self.pixels(vertical))
+            .px(self.pixels(horizontal));
         if in_rect || in_row {
             cell = cell.bg(theme.row_selected_bg);
         } else if matched {
             // `.search-match` in the stylesheet: a matched cell is tinted so a hit is findable
             // by eye without reading every row.
             cell = cell.bg(theme.node_bg_2);
-        }
-        // A run of selected rows is outlined as one band, not one box per row.
-        if in_row && band_top {
-            cell = cell.border_t_1().border_color(theme.accent);
-        }
-        if in_row && band_bottom {
-            cell = cell.border_b_1().border_color(theme.accent);
         }
 
         let links = self
@@ -548,6 +710,8 @@ impl TableDelegate for ResultDelegate {
                 .child(open)
                 .into_any_element();
         }
+
+        let outlines = self.outlines(row_ix, col_ix, cx);
 
         cell.on_mouse_down(
             MouseButton::Left,
@@ -565,11 +729,26 @@ impl TableDelegate for ResultDelegate {
                     col_ix,
                     event.modifiers.shift,
                 );
+                // The preview is of a press that has now happened, and it would otherwise sit
+                // dashed over the selection it just became.
+                table.delegate_mut().set_ghost(None);
                 cx.notify();
             }),
         )
         .on_mouse_move(cx.listener(move |table, event: &MouseMoveEvent, _, cx| {
             if event.pressed_button != Some(MouseButton::Left) {
+                table.delegate_mut().set_hovered(Some(MenuTarget {
+                    row,
+                    position: row_ix,
+                    column: col_ix,
+                    header: false,
+                }));
+                let ghost = table
+                    .delegate()
+                    .ghost_for((row_ix, col_ix), event.modifiers);
+                if table.delegate_mut().set_ghost(ghost) {
+                    cx.notify();
+                }
                 return;
             }
             table
@@ -590,29 +769,11 @@ impl TableDelegate for ResultDelegate {
                 cx.notify();
             }),
         )
+        .children(outlines)
         .child(if links {
-            // A cell whose column really references another table is a link: pressing it claims
-            // the press so the table does not also start a selection, which is the rule
-            // `useCellSelection` follows for `.reference--link`.
-            div()
-                .id(("result-link", row_ix * 1000 + col_ix))
-                // Fills the cell, so the whole value is the target rather than whatever width
-                // the text happens to take.
-                .size_full()
-                .cursor_pointer()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
-                )
-                .on_click(cx.listener(move |table, _, window, cx| {
-                    table
-                        .delegate_mut()
-                        .follow_reference(row, col_ix, window, cx);
-                }))
-                .child(cells::cell(&value, &sql_type, self.role(col_ix), cx))
-                .into_any_element()
+            self.link_cell((row_ix, col_ix), (row, &value), cx)
         } else {
-            cells::cell(&value, &sql_type, self.role(col_ix), cx)
+            cells::cell(&value, self.role(col_ix), cx)
         })
         .into_any_element()
     }
@@ -666,6 +827,7 @@ impl ResultDelegate {
             return TableColumn::new("pivot-field", "Field")
                 .width(self.pixels(pivot::FIELD_WIDTH))
                 .movable(false)
+                .p_0()
                 // A width dragged here would be written back under a real column's name, which
                 // is a width the table view would then wear.
                 .resizable(false);
@@ -674,21 +836,24 @@ impl ResultDelegate {
         TableColumn::new(name.clone(), name)
             .width(self.pixels(pivot::VALUE_WIDTH))
             .movable(false)
+            .p_0()
             .resizable(false)
     }
 
-    fn pivot_th(col_ix: usize, cx: &App) -> gpui_kit::AnyElement {
+    fn pivot_th(&self, col_ix: usize, cx: &App) -> gpui_kit::AnyElement {
         let theme = cx.peek_theme();
         let label = if col_ix == 0 {
             "Field".to_string()
         } else {
             format!("#{col_ix}")
         };
+        let (vertical, horizontal) = HEADER_PADDING;
         div()
             .size_full()
             .flex()
             .items_center()
-            .bg(theme.node_bg)
+            .py(self.pixels(vertical))
+            .px(self.pixels(horizontal))
             .text_color(theme.fg_subtle)
             .child(label)
             .into_any_element()
@@ -706,11 +871,14 @@ impl ResultDelegate {
         let (name, sql_type) = (column.name.clone(), column.sql_type.clone());
         let role = self.role(row_ix);
         let field_bg = cx.peek_theme().node_bg_2;
+        let (vertical, horizontal) = CELL_PADDING;
 
         if col_ix == 0 {
             return div()
                 .size_full()
                 .bg(field_bg)
+                .py(self.pixels(vertical))
+                .px(self.pixels(horizontal))
                 .child(super::cells::header(&name, &sql_type, role, cx))
                 .into_any_element();
         }
@@ -727,6 +895,8 @@ impl ResultDelegate {
         div()
             .id(("result-pivot-td", row_ix * 1000 + col_ix))
             .size_full()
+            .py(self.pixels(vertical))
+            .px(self.pixels(horizontal))
             .when(matched, |cell| cell.bg(match_bg))
             // A long value or a JSON object is a one-line summary here as it is in the table, so
             // the pane is the only way to read it whole.
@@ -739,7 +909,7 @@ impl ResultDelegate {
                     }
                 }),
             )
-            .child(super::cells::cell(&value, &sql_type, role, cx))
+            .child(super::cells::cell(&value, role, cx))
             .into_any_element()
     }
 

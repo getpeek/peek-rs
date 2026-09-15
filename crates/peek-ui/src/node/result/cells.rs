@@ -12,7 +12,7 @@
 
 use gpui_kit::component::StyledExt;
 use gpui_kit::prelude::*;
-use gpui_kit::{AnyElement, App, Hsla, div, rems};
+use gpui_kit::{AnyElement, App, Hsla, div, px, rems};
 use peek_document::Cell;
 
 use super::column_roles::Role;
@@ -28,18 +28,28 @@ fn role_color(role: Role, theme: &PeekTheme) -> Option<Hsla> {
     }
 }
 
+/// The alphas `.reference` mixes its chip out of its `--chip-color`: a barely-there fill under a
+/// border you can actually see.
+const CHIP_FILL: f32 = 0.11;
+const CHIP_BORDER: f32 = 0.28;
+/// `.reference`'s own corner, which is smaller than anything in the theme's radius scale because
+/// the chip has to sit inside a table row without touching its neighbours.
+const CHIP_RADIUS: f32 = 5.0;
+/// The `PK` / `FK` tag next to a column name (`node.css`, `.col-tag`).
+const TAG_RADIUS: f32 = 3.0;
+
+/// Names the header cell so hovering it can tint the column name inside it, which is
+/// `thead th:hover .col-name` — the one cue that a header is a control.
+pub(super) const HEADER_GROUP: &str = "result-th";
+
 /// A value's one-line rendering.
-pub(super) fn cell(value: &Cell, sql_type: &str, role: Role, cx: &App) -> AnyElement {
+pub(super) fn cell(value: &Cell, role: Role, cx: &App) -> AnyElement {
     let theme = cx.peek_theme();
     if let Some(color) = role_color(role, theme) {
         // A key or a reference is tinted whatever its type, because what matters about it is
         // that it identifies a row rather than what it holds.
         if !matches!(value, Cell::Null | Cell::Undecodable | Cell::Json(_)) {
-            return div()
-                .truncate()
-                .text_color(color)
-                .child(value.to_display_string())
-                .into_any_element();
+            return chip(&value.to_display_string(), color);
         }
     }
     match value {
@@ -49,8 +59,9 @@ pub(super) fn cell(value: &Cell, sql_type: &str, role: Role, cx: &App) -> AnyEle
         // A decode failure is not a NULL, and saying so beats an empty cell the user would read
         // as "this row has no value here".
         Cell::Undecodable => marker("unreadable", theme.red),
-        Cell::Int(_) | Cell::Float(_) => numeric(&value.to_display_string(), theme),
-        Cell::Text(text) if peek_document::is_numeric(sql_type) => numeric(text, theme),
+        // `Result.css` has no alignment rule for a `td`, so a number reads left like everything
+        // else. The table is already mono, so its digits line up regardless.
+        Cell::Int(_) | Cell::Float(_) => plain(&value.to_display_string(), theme),
         Cell::Text(text) => plain(text, theme),
     }
 }
@@ -63,16 +74,22 @@ fn plain(text: &str, theme: &PeekTheme) -> AnyElement {
         .into_any_element()
 }
 
-/// Numbers are right-aligned with tabular figures so digits line up column-wise, which is what
-/// makes a column of amounts comparable at a glance.
-fn numeric(text: &str, theme: &PeekTheme) -> AnyElement {
+/// `.reference`: a key or a reference value reads as a token rather than as text, so a row's
+/// identity is findable without reading it. The fill and border are mixed out of the role's own
+/// colour, which is what keeps one rule working for both the yellow and the blue.
+fn chip(text: &str, color: Hsla) -> AnyElement {
     div()
-        .w_full()
-        .truncate()
-        .text_right()
-        .font_family("Monaspace Krypton")
-        .text_color(theme.fg)
-        .child(text.to_string())
+        .h_flex()
+        .items_center()
+        .flex_none()
+        .max_w_full()
+        .px(rems(0.4375))
+        .rounded(px(CHIP_RADIUS))
+        .border_1()
+        .border_color(color.opacity(CHIP_BORDER))
+        .bg(color.opacity(CHIP_FILL))
+        .text_color(color)
+        .child(div().truncate().child(text.to_string()))
         .into_any_element()
 }
 
@@ -113,8 +130,8 @@ fn summary(value: &Cell, theme: &PeekTheme) -> AnyElement {
 pub(super) fn header(name: &str, sql_type: &str, role: Role, cx: &App) -> AnyElement {
     let theme = cx.peek_theme();
     let tag = match role {
-        Role::PrimaryKey => Some(("PK", theme.yellow)),
-        Role::ForeignKey => Some(("FK", theme.blue)),
+        Role::PrimaryKey => Some(("PK", theme.yellow, theme.yellow_soft)),
+        Role::ForeignKey => Some(("FK", theme.blue, theme.blue_soft)),
         Role::Plain => None,
     };
     div()
@@ -134,17 +151,18 @@ pub(super) fn header(name: &str, sql_type: &str, role: Role, cx: &App) -> AnyEle
                 .child(
                     div()
                         .truncate()
-                        .text_color(tag.map_or(theme.fg, |(_, color)| color))
+                        .text_color(tag.map_or(theme.fg, |(_, color, _)| color))
+                        .group_hover(HEADER_GROUP, |name| name.text_color(theme.accent_soft))
                         .child(name.to_string()),
                 )
-                .children(tag.map(|(label, color)| {
+                .children(tag.map(|(label, color, soft)| {
                     div()
                         .flex_none()
-                        .px(rems(0.1875))
-                        .rounded(theme.radius_pill)
-                        .text_size(rems(0.5))
+                        .px(rems(0.25))
+                        .rounded(px(TAG_RADIUS))
+                        .text_size(rems(0.5625))
                         .text_color(color)
-                        .bg(theme.node_bg_2)
+                        .bg(soft)
                         .child(label)
                 })),
         )
@@ -152,9 +170,11 @@ pub(super) fn header(name: &str, sql_type: &str, role: Role, cx: &App) -> AnyEle
             div()
                 .truncate()
                 .flex_none()
-                .text_size(rems(0.5625))
+                .text_size(rems(0.59375))
                 .text_color(theme.fg_subtle)
-                .child(sql_type.to_lowercase()),
+                // `.col-type { text-transform: uppercase }`: the type is a label about the
+                // column, not a value, and the case is what keeps it from reading as one.
+                .child(sql_type.to_uppercase()),
         )
         .into_any_element()
 }

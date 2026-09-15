@@ -379,6 +379,30 @@ const QUERY_ERROR_DOCUMENT: &str = r#"{
 
 const QUERY_ERROR: &str = "query_bbbbbbbb-error";
 
+/// Every node with a shell carries an X in its header, and it deletes that node through the
+/// ordinary command rather than reaching into the document — so it undoes like any other
+/// deletion. (Text and Draw draw no header at all: `kind::is_bare`.)
+#[gpui_kit::test]
+fn the_header_close_button_deletes_the_node(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx, QUERY_ERROR_DOCUMENT);
+    assert_eq!(node_count(cx, &workspace), 1);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click(SharedString::from(format!("{QUERY_ERROR}-close")), cx);
+    })
+    .unwrap();
+
+    assert_eq!(node_count(cx, &workspace), 0, "the node is gone");
+
+    cx.update(|cx| {
+        workspace
+            .read(cx)
+            .document(cx)
+            .update(cx, |document, _| document.undo());
+    });
+    assert_eq!(node_count(cx, &workspace), 1, "and undo brings it back");
+}
+
 /// The same words the fixture hands the node, unescaped.
 const DATABASE_MESSAGE: &str =
     "ERROR: relation \"usrs\" does not exist\nLINE 1: select * from usrs\n                      ^";

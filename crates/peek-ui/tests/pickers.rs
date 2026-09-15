@@ -125,6 +125,57 @@ fn the_palette_offers_one_go_to_row_per_inactive_page(cx: &mut TestAppContext) {
     );
 }
 
+/// The palette state is retained across opens, so a command executed from a search would leave
+/// that search filtering the list the next time the palette came up. Row `(0,0,0)` is the first
+/// registry command, "Zoom in", which the query below cannot match.
+#[gpui_kit::test]
+fn executing_a_command_clears_the_palette_query(cx: &mut TestAppContext) {
+    let (handle, _) = open(cx);
+    let first_row = "index-path(0,0,0)";
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.dispatch_action(Box::new(actions::command_palette::Open), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    render(cx, handle);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.input("text", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    render(cx, handle);
+
+    cx.update_window(handle.into(), |_, window, _| {
+        assert!(
+            window.try_find(first_row).is_none(),
+            "the query filters the first command away"
+        );
+    })
+    .unwrap();
+
+    cx.update_window(handle.into(), |_, window, cx| window.press("enter", cx))
+        .unwrap();
+    cx.run_until_parked();
+    render(cx, handle);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.dispatch_action(Box::new(actions::command_palette::Open), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    render(cx, handle);
+
+    cx.update_window(handle.into(), |_, window, _| {
+        assert!(
+            window.try_find(first_row).is_some(),
+            "reopening the palette starts from an empty query"
+        );
+    })
+    .unwrap();
+}
+
 /// `Page::GoTo` carries its target, has no binding, and is dispatched by the palette through the
 /// canvas focus handle — the path that silently swallowed node-scoped commands before.
 #[gpui_kit::test]

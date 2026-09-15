@@ -27,9 +27,11 @@ mod edit;
 mod editable;
 mod follow;
 mod json;
+pub(crate) mod menu;
+mod outline;
 pub(crate) mod pivot;
 mod search;
-mod selection;
+pub(crate) mod selection;
 mod toolbar;
 mod widths;
 
@@ -41,7 +43,7 @@ use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::{Sizable, Size, StyledExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, App, Context, Entity, Render, SharedString, Task, Window, div, px, rems,
+    AnyElement, App, Context, Entity, Render, SharedString, Task, WeakEntity, Window, div, px, rems,
 };
 use peek_canvas::Document;
 use std::collections::BTreeMap;
@@ -58,27 +60,50 @@ use super::state::NodeState;
 /// `useResultSearchMatches`'s debounce before a query is matched against every cell.
 const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// The header's own title, `nodeHeading` in `queryHeading.ts`: the query's first meaningful line,
-/// cut at 60 characters.
+/// The header's own title, `nodeHeading` in `queryHeading.ts`: the whole query on one line, cut
+/// at 60 characters.
 const HEADING_LIMIT: usize = 60;
 
+/// What `ResultNode.tsx` puts in front of the heading, so a result says what it is even when the
+/// query behind it has been scrolled out of the title.
+const TITLE_PREFIX: &str = "result · ";
+
 pub(crate) fn title(data: &ResultData) -> String {
-    heading(&data.query)
+    format!("{TITLE_PREFIX}{}", heading(&data.query))
 }
 
 /// The same cut applied to raw SQL, for callers holding a query rather than a node's data —
 /// page search names a result by the statement behind it.
+///
+/// Every line is joined rather than only the first taken: a query formatted across lines starts
+/// with a bare `SELECT`, and a node titled "SELECT" says nothing about which one it is.
+///
+/// One divergence: `nodeHeading` appends `...` unconditionally, so a one-word query reads
+/// `SELECT 1...`. The ellipsis is only appended here when something was actually cut.
 pub(crate) fn heading(query: &str) -> String {
-    let line = query
+    let joined = query
+        .trim_start()
+        .trim_start_matches("--")
         .lines()
-        .map(|line| line.trim_start_matches("--").trim())
-        .find(|line| !line.is_empty())
-        .unwrap_or("result");
-    if line.chars().count() <= HEADING_LIMIT {
-        return line.to_string();
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if joined.is_empty() {
+        return "result".to_string();
     }
-    let cut: String = line.chars().take(HEADING_LIMIT).collect();
+    if joined.chars().count() <= HEADING_LIMIT {
+        return joined;
+    }
+    let cut: String = joined.chars().take(HEADING_LIMIT).collect();
     format!("{cut}...")
+}
+
+/// `id`, or anything ending `_id`: a column the reference excludes from charting because
+/// plotting a key plots the row numbers.
+fn is_identifier(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name == "id" || name.ends_with("_id")
 }
 
 /// Retained state: the table, which owns the scroll position and the visible range, wrapped in
@@ -103,6 +128,9 @@ pub(crate) struct ResultTable {
     pub(super) table: Entity<TableState<ResultDelegate>>,
     pub(super) node: NodeId,
     document: Entity<Document>,
+    /// The canvas, which draws this node's right-click menu — chrome does not belong inside a
+    /// node body, where it would scale with the camera. Weak: the canvas owns this view.
+    pub(super) canvas: WeakEntity<crate::canvas::CanvasView>,
     /// Tables the query reads, for the toolbar's badges. Recomputed only when the SQL changes:
     /// parsing a statement every frame would be wasteful and the answer never moves on its own.
     pub(super) tables: Vec<SharedString>,
@@ -119,6 +147,8 @@ pub(crate) struct ResultTable {
     pub(super) search_open: bool,
     pub(super) search_input: Entity<InputState>,
     pub(super) search_query: String,
+    /// Which of Export or Copy is asking for a format, if either is.
+    pub(super) format_menu: Option<toolbar::Destination>,
     /// Dropping it cancels the pending search, so reassigning *is* restart-the-debounce.
     search_task: Task<()>,
     /// Element ids derived from the node id. Built once: they never change, and `format!`ing
@@ -131,10 +161,16 @@ pub(crate) struct ResultTable {
 #[derive(Debug, Clone)]
 pub(super) struct ElementIds {
     pub(super) table: SharedString,
+    pub(super) grid: SharedString,
+    pub(super) catcher: SharedString,
     pub(super) delete: SharedString,
+    pub(super) chart: SharedString,
+    pub(super) export: SharedString,
+    pub(super) copy: SharedString,
     pub(super) pivot: SharedString,
     pub(super) search: SharedString,
     pub(super) search_close: SharedString,
+    pub(super) format_close: SharedString,
     pub(super) detail_close: SharedString,
 }
 
@@ -142,10 +178,16 @@ impl ElementIds {
     fn new(node: &NodeId) -> Self {
         Self {
             table: SharedString::from(format!("{node}-table")),
+            grid: SharedString::from(format!("{node}-grid")),
+            catcher: SharedString::from(format!("{node}-right-press")),
             delete: SharedString::from(format!("{node}-delete")),
+            chart: SharedString::from(format!("{node}-chart")),
+            export: SharedString::from(format!("{node}-export")),
+            copy: SharedString::from(format!("{node}-copy")),
             pivot: SharedString::from(format!("{node}-pivot")),
             search: SharedString::from(format!("{node}-search")),
             search_close: SharedString::from(format!("{node}-search-close")),
+            format_close: SharedString::from(format!("{node}-format-close")),
             detail_close: SharedString::from(format!("{node}-detail-close")),
         }
     }
@@ -218,20 +260,68 @@ impl ResultTable {
         });
     }
 
-    /// The toolbar's Pivot button. It selects its own node first, because the handler pivots the
-    /// *selection* — a click on an unselected result would otherwise pivot whichever node was.
-    /// Dispatching rather than calling the toggle keeps the button, the palette and the keyboard
-    /// on one path.
-    fn dispatch_pivot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Every toolbar button acts on the canvas *selection*, because that is what the commands
+    /// behind them read — a click on an unselected result would otherwise pivot, chart or export
+    /// whichever node happened to be selected instead.
+    pub(super) fn select_self(&mut self, cx: &mut Context<Self>) {
         let node = self.node.clone();
         self.document.update(cx, |document, cx| {
             document.select_only([node]);
             cx.notify();
         });
+    }
+
+    /// The toolbar's Pivot button. Dispatching rather than calling the toggle keeps the button,
+    /// the palette and the keyboard on one path.
+    fn dispatch_pivot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_self(cx);
         window.dispatch_action(Box::new(crate::commands::actions::result::Pivot), cx);
     }
 
+    /// The toolbar's Chart button, on the same path.
+    fn dispatch_chart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_self(cx);
+        window.dispatch_action(Box::new(crate::commands::actions::result::Chart), cx);
+    }
+
+    /// Whether there is anything here worth plotting: at least one column that really holds
+    /// numbers and is not an identifier (`canChart` in `ResultToolbar.tsx`). A chart of a column
+    /// of primary keys is a chart of the row numbers.
+    ///
+    /// The reference asks `typeof value === "number"`, which a NUMERIC arriving as text fails
+    /// even though its own `buildChartData` would plot it; reading the cell's kind reproduces
+    /// that rather than quietly improving on it.
+    pub(super) fn chartable(&self, cx: &App) -> bool {
+        let table = self.table.read(cx);
+        let rows = table.delegate().result_rows();
+        rows.row_count() > 0
+            && rows.columns().iter().enumerate().any(|(index, column)| {
+                !is_identifier(&column.name)
+                    && (0..rows.row_count()).any(|row| {
+                        matches!(
+                            rows.cell(row, index),
+                            Some(peek_document::Cell::Int(_) | peek_document::Cell::Float(_))
+                        )
+                    })
+            })
+    }
+
+    pub(super) fn open_format_menu(
+        &mut self,
+        destination: toolbar::Destination,
+        cx: &mut Context<Self>,
+    ) {
+        self.format_menu = Some(destination);
+        cx.notify();
+    }
+
+    pub(super) fn close_format_menu(&mut self, cx: &mut Context<Self>) {
+        self.format_menu = None;
+        cx.notify();
+    }
+
     fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.format_menu = None;
         self.search_open = true;
         self.search_input.update(cx, |input, cx| {
             input.focus(window, cx);
@@ -311,13 +401,82 @@ impl ResultTable {
     }
 
     /// Escape clears, and so does a press on the table's blank space.
+    /// Takes the right press before `DataTable` does.
+    ///
+    /// The vendored table attaches its own `ContextMenu` to the element wrapping every row, and
+    /// registers that listener **after** painting its children — so it is dispatched *before*
+    /// them, and a cell's own right-press handler can neither beat it nor stop it. Its menu is
+    /// always empty here (`cell_selectable` is off, so it never learns which row was clicked),
+    /// but building it retains a `PopupMenu` entity that outlives the window.
+    ///
+    /// A transparent sibling painted after the table registers later still, so it is offered the
+    /// press first and can claim it. It reads what the pointer is over rather than redoing the
+    /// table's row and column arithmetic — `set_hovered` records that on the move that must
+    /// precede any press.
+    fn right_press_catcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id(self.ids.catcher.clone())
+            .absolute()
+            .inset_0()
+            // Only right presses are claimed, so selection, scrolling and hover all carry on
+            // through this element untouched.
+            .on_mouse_down(
+                gpui_kit::MouseButton::Right,
+                cx.listener(|this, event: &gpui_kit::MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    let Some(target) = this.table.read(cx).delegate().hovered() else {
+                        return;
+                    };
+                    let focus = gpui_kit::Focusable::focus_handle(this.table.read(cx), cx);
+                    window.focus(&focus, cx);
+                    let at = event.position;
+                    // Building the menu reads this table back while it is mid-update, which is
+                    // the re-entrant borrow `open_cell` documents — it aborts rather than panics.
+                    let this = cx.entity().downgrade();
+                    window.defer(cx, move |_, cx| {
+                        this.update(cx, |this, cx| {
+                            if target.header {
+                                this.open_header_menu(target, at, cx);
+                            } else {
+                                this.open_cell_menu(target, at, cx);
+                            }
+                        })
+                        .ok();
+                    });
+                }),
+            )
+    }
+
+    /// Drops the dashed preview. The pointer has left the grid, so there is no press to preview.
+    fn clear_ghost(&mut self, cx: &mut Context<Self>) {
+        self.table.update(cx, |table, cx| {
+            if table.delegate_mut().clear_ghost() {
+                cx.notify();
+            }
+        });
+    }
+
     fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        // Escape dispatches from the focused element outward, and a right press focuses this
+        // table — so the node sees the key before the canvas does and has to take the menu down
+        // itself, or escape would clear the selection out from under an open menu.
+        if self
+            .canvas
+            .upgrade()
+            .is_some_and(|canvas| canvas.update(cx, crate::canvas::CanvasView::close_context_menu))
+        {
+            return;
+        }
         if self.table.read(cx).delegate().editing().is_some() {
             self.cancel_edit(cx);
             return;
         }
         if self.table.read(cx).delegate().detail().is_some() {
             self.close_detail(cx);
+            return;
+        }
+        if self.format_menu.is_some() {
+            self.close_format_menu(cx);
             return;
         }
         if self.search_open {
@@ -400,10 +559,11 @@ impl ResultState {
     pub(crate) fn new(
         id: &NodeId,
         data: &ResultData,
-        document: &Entity<Document>,
+        owners: (&Entity<Document>, &WeakEntity<crate::canvas::CanvasView>),
         window: &mut Window,
         cx: &mut App,
     ) -> Self {
+        let (document, canvas) = owners;
         let rows = document.read(cx).result(id).cloned().unwrap_or_default();
         let edit_input = cx.new(|cx| InputState::new(window, cx));
         let delegate = ResultDelegate::new(rows, data.column_widths.as_ref(), edit_input.clone());
@@ -467,7 +627,9 @@ impl ResultState {
             table,
             node,
             document,
+            canvas: canvas.clone(),
             search_open: false,
+            format_menu: None,
             search_input,
             search_query: String::new(),
             search_task: Task::ready(()),
@@ -481,7 +643,6 @@ impl ResultState {
         Self { inner }
     }
 
-    #[cfg(test)]
     pub(crate) fn inner(&self) -> Entity<ResultTable> {
         self.inner.clone()
     }
@@ -598,14 +759,26 @@ impl Render for ResultTable {
                 empty_state("No results", cx)
             } else {
                 div()
+                    .id(self.ids.grid.clone())
                     .flex_1()
                     .min_h_0()
+                    // 12 px against the node body's 13 px (`.app-node table { font-size: 12px }`).
+                    .text_size(rems(0.75))
+                    // The dashed preview belongs to wherever the pointer is; once it has left the
+                    // grid there is no press to preview.
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        if !*hovered {
+                            this.clear_ghost(cx);
+                        }
+                    }))
+                    .relative()
                     .child(
                         DataTable::new(&table)
                             .bordered(false)
                             .stripe(false)
                             .with_size(Size::Size(row_height)),
                     )
+                    .child(self.right_press_catcher(cx))
                     .into_any_element()
             })
     }
@@ -716,7 +889,7 @@ fn empty_state(message: &str, cx: &App) -> AnyElement {
 mod tests {
     use peek_document::ResultData;
 
-    use super::title;
+    use super::{heading, title};
 
     fn data(query: &str) -> ResultData {
         ResultData {
@@ -725,10 +898,20 @@ mod tests {
         }
     }
 
+    /// `nodeHeading` joins the whole statement onto one line. Taking only the first would title
+    /// every formatted query `SELECT`, which is what the node header used to show.
     #[test]
-    fn the_title_is_the_querys_first_meaningful_line() {
+    fn the_heading_joins_a_multi_line_query() {
         assert_eq!(
-            title(&data("\n\n  select * from users  ")),
+            heading("SELECT\n  DATE_TRUNC('month', s.created_at)\nFROM subscriptions s"),
+            "SELECT DATE_TRUNC('month', s.created_at) FROM subscriptions ..."
+        );
+    }
+
+    #[test]
+    fn the_heading_is_the_query_on_one_line() {
+        assert_eq!(
+            heading("\n\n  select * from users  "),
             "select * from users"
         );
     }
@@ -736,27 +919,37 @@ mod tests {
     /// `nodeHeading` strips a leading comment marker, so a documented query is not titled `--`.
     #[test]
     fn a_leading_comment_marker_is_stripped() {
-        assert_eq!(title(&data("-- everyone\nselect 1")), "everyone");
+        assert_eq!(heading("-- everyone\nselect 1"), "everyone select 1");
     }
 
     #[test]
     fn a_long_query_is_cut_with_an_ellipsis() {
         let long = format!("select {}", "x".repeat(100));
-        let title = title(&data(&long));
-        assert_eq!(title.chars().count(), 63, "60 characters plus the ellipsis");
-        assert!(title.ends_with("..."));
+        let heading = heading(&long);
+        assert_eq!(
+            heading.chars().count(),
+            63,
+            "60 characters plus the ellipsis"
+        );
+        assert!(heading.ends_with("..."));
     }
 
     #[test]
-    fn an_empty_query_still_has_a_title() {
-        assert_eq!(title(&data("")), "result");
+    fn an_empty_query_still_has_a_heading() {
+        assert_eq!(heading(""), "result");
     }
 
     /// Multi-byte text must be cut on a character boundary, not a byte one.
     #[test]
     fn a_long_multibyte_query_does_not_panic() {
         let long = "é".repeat(200);
-        assert_eq!(title(&data(&long)).chars().count(), 63);
+        assert_eq!(heading(&long).chars().count(), 63);
+    }
+
+    /// The node header says what the node is before it says which query made it.
+    #[test]
+    fn the_title_names_the_kind_before_the_query() {
+        assert_eq!(title(&data("select 1")), "result · select 1");
     }
 }
 
@@ -812,6 +1005,21 @@ mod render_tests {
                     vec![
                         Cell::Int(i64::try_from(index).unwrap()),
                         Cell::Text(format!("row {index}")),
+                    ]
+                })
+                .collect(),
+        )
+    }
+
+    /// A result with a column that really is worth plotting: a label and a total.
+    fn plottable() -> ResultSet {
+        ResultSet::new(
+            vec![Column::new("name", "TEXT"), Column::new("total", "INT8")],
+            (0..4)
+                .map(|index| {
+                    vec![
+                        Cell::Text(format!("row {index}")),
+                        Cell::Int(i64::from(index) * 3),
                     ]
                 })
                 .collect(),
@@ -991,6 +1199,80 @@ mod render_tests {
         visual.run_until_parked();
     }
 
+    /// A right-press, which is what raises a context menu.
+    fn right_click_at(visual: &mut VisualTestContext, at: gpui_kit::Point<gpui_kit::Pixels>) {
+        visual.simulate_event(MouseMoveEvent {
+            position: at,
+            pressed_button: None,
+            modifiers: Modifiers::default(),
+        });
+        visual.simulate_event(MouseDownEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        visual.simulate_event(MouseUpEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        });
+        visual.run_until_parked();
+    }
+
+    /// Whether the menu is up at all.
+    fn menu_is_open(cx: &mut TestAppContext, handle: gpui_kit::WindowHandle<Root>) -> bool {
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .try_find(SharedString::from("context-menu"))
+                .is_some()
+        })
+        .unwrap()
+    }
+
+    /// Hovers a heading to open its submenu, then clicks one of its formats — the gesture a
+    /// user makes, and the only way the leaf is rendered at all.
+    fn choose_format(
+        cx: &mut TestAppContext,
+        handle: gpui_kit::WindowHandle<Root>,
+        heading: &str,
+        format: &str,
+    ) {
+        let node = result_node();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.hover(SharedString::from(format!("{node}-menu-{heading}")), cx);
+            window.render_frame(cx);
+            window.click(
+                SharedString::from(format!("{node}-menu-{heading}-{format}")),
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// One menu row's label, or `None` when that row is not in the menu.
+    ///
+    /// `DataTable` registers no ids for its cells, but the menu is ours and every row carries
+    /// one derived from the node — so a test asks for the item it means rather than counting.
+    fn menu_item(
+        cx: &mut TestAppContext,
+        handle: gpui_kit::WindowHandle<Root>,
+        suffix: &str,
+    ) -> Option<String> {
+        let id = SharedString::from(format!("{}-menu-{suffix}", result_node()));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .try_find(id)
+                .and_then(|item| item.label().map(ToString::to_string))
+        })
+        .unwrap()
+    }
+
     /// Opens the find bar, types, and waits out the 100 ms debounce.
     fn type_search(
         cx: &mut TestAppContext,
@@ -1065,6 +1347,17 @@ mod render_tests {
         .unwrap()
     }
 
+    /// The middle of a column header, which sits between the toolbar and the first row.
+    fn header_at(
+        bounds: gpui_kit::Bounds<gpui_kit::Pixels>,
+        column: f32,
+    ) -> gpui_kit::Point<gpui_kit::Pixels> {
+        point(
+            bounds.origin.x + px(40.0) + px(column * 299.0),
+            bounds.origin.y + px(28.0 + 17.0),
+        )
+    }
+
     fn cell_at(
         bounds: gpui_kit::Bounds<gpui_kit::Pixels>,
         row: f32,
@@ -1122,6 +1415,61 @@ mod render_tests {
             selection_label(cx, handle),
             "6 cells selected",
             "three rows by two columns"
+        );
+    }
+
+    /// Pressing a column header takes the whole column.
+    ///
+    /// This is the regression the outline work exists for: the press always selected, and the
+    /// node body's clear-on-press then wiped it in the same event, because `render_th` did not
+    /// claim the press the way `render_td` does. Remove that `stop_propagation` and this reads
+    /// "no selection".
+    #[gpui_kit::test]
+    fn clicking_a_column_header_selects_the_column(cx: &mut TestAppContext) {
+        let (handle, _) = open(cx, 6);
+        let bounds = table_bounds(cx, handle);
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+
+        click_at(&mut visual, header_at(bounds, 1.0));
+
+        assert_eq!(
+            selection_label(cx, handle),
+            "6 cells selected",
+            "every row of the column it names"
+        );
+    }
+
+    /// Dragging sideways across headers widens the selection to a range of whole columns.
+    #[gpui_kit::test]
+    fn dragging_across_headers_extends_the_column_range(cx: &mut TestAppContext) {
+        let (handle, _) = open(cx, 4);
+        let bounds = table_bounds(cx, handle);
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+
+        drag_cells(&mut visual, header_at(bounds, 0.0), header_at(bounds, 1.0));
+
+        assert_eq!(
+            selection_label(cx, handle),
+            "8 cells selected",
+            "four rows across both columns"
+        );
+    }
+
+    /// A column stops at the last row on screen, not the last row in the result: the positions a
+    /// selection holds are display positions, and a search has re-sorted and filtered them.
+    #[gpui_kit::test]
+    fn a_header_click_during_a_search_selects_only_the_visible_rows(cx: &mut TestAppContext) {
+        let (handle, workspace) = open(cx, 6);
+        let bounds = table_bounds(cx, handle);
+        type_search(cx, handle, &workspace, "row 3");
+
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        click_at(&mut visual, header_at(bounds, 1.0));
+
+        assert_eq!(
+            selection_label(cx, handle),
+            "1 cell selected",
+            "the one row the search left, not all six"
         );
     }
 
@@ -1368,6 +1716,359 @@ mod render_tests {
         assert_eq!(headers, ["Field", "#1", "#2"]);
         assert_eq!(body[0], ["id", "0", "1"]);
         assert_eq!(body[1], ["name", "row 0", "row 1"]);
+    }
+
+    /// A right-click raises the menu on the clicked cell and leaves the selection exactly where
+    /// it was. Three separate guards enforce that in the reference, and it is what lets the menu
+    /// act on a cell outside the selection without destroying it.
+    #[gpui_kit::test]
+    fn right_clicking_a_cell_opens_the_menu_without_changing_the_selection(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, _) = open(cx, 6);
+        let bounds = table_bounds(cx, handle);
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+
+        drag_cells(
+            &mut visual,
+            cell_at(bounds, 0.0, 0.0),
+            cell_at(bounds, 2.0, 1.0),
+        );
+        assert_eq!(selection_label(cx, handle), "6 cells selected");
+
+        right_click_at(&mut visual, cell_at(bounds, 4.0, 0.0));
+
+        assert!(menu_is_open(cx, handle), "the menu is up");
+        assert_eq!(
+            selection_label(cx, handle),
+            "6 cells selected",
+            "and the rectangle it was opened away from is untouched"
+        );
+    }
+
+    /// Right-clicking away from the selection targets the clicked cell, so the labels are
+    /// singular and `Copy "value"` names that cell's value.
+    #[gpui_kit::test]
+    fn right_clicking_outside_the_selection_acts_on_the_clicked_cell(cx: &mut TestAppContext) {
+        let (handle, _) = open(cx, 6);
+        let bounds = table_bounds(cx, handle);
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+
+        drag_cells(
+            &mut visual,
+            cell_at(bounds, 0.0, 0.0),
+            cell_at(bounds, 2.0, 1.0),
+        );
+        right_click_at(&mut visual, cell_at(bounds, 4.0, 1.0));
+
+        assert_eq!(
+            menu_item(cx, handle, "copy-value").as_deref(),
+            Some("Copy \"row 4\""),
+            "the value under the pointer, not one from the rectangle"
+        );
+        assert_eq!(menu_item(cx, handle, "copy").as_deref(), Some("Copy row"));
+    }
+
+    /// Inside the rectangle the menu speaks for the whole selection instead.
+    #[gpui_kit::test]
+    fn right_clicking_inside_the_selection_acts_on_it(cx: &mut TestAppContext) {
+        let (handle, _) = open(cx, 6);
+        let bounds = table_bounds(cx, handle);
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+
+        drag_cells(
+            &mut visual,
+            cell_at(bounds, 0.0, 0.0),
+            cell_at(bounds, 2.0, 1.0),
+        );
+        right_click_at(&mut visual, cell_at(bounds, 1.0, 1.0));
+
+        assert_eq!(
+            menu_item(cx, handle, "copy").as_deref(),
+            Some("Copy selection")
+        );
+        assert_eq!(
+            menu_item(cx, handle, "copy-value"),
+            None,
+            "a rectangle has no single value to copy"
+        );
+    }
+
+    /// A rectangle two columns wide has no single list of values, so it offers no variable —
+    /// `spawnVariableFromSelection`'s guard.
+    #[gpui_kit::test]
+    fn a_two_column_selection_offers_no_variable(cx: &mut TestAppContext) {
+        let (handle, _) = open(cx, 6);
+        let bounds = table_bounds(cx, handle);
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+
+        drag_cells(
+            &mut visual,
+            cell_at(bounds, 0.0, 0.0),
+            cell_at(bounds, 2.0, 1.0),
+        );
+        right_click_at(&mut visual, cell_at(bounds, 1.0, 1.0));
+        assert_eq!(menu_item(cx, handle, "variable"), None);
+
+        // The open menu's scrim takes the next press, which is what dismisses it — so a second
+        // gesture needs the menu gone first, exactly as it would for a user.
+        cx.update_window(handle.into(), |_, window, cx| window.press("escape", cx))
+            .unwrap();
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        drag_cells(
+            &mut visual,
+            cell_at(bounds, 0.0, 1.0),
+            cell_at(bounds, 2.0, 1.0),
+        );
+        right_click_at(&mut visual, cell_at(bounds, 1.0, 1.0));
+        assert_eq!(
+            menu_item(cx, handle, "variable").as_deref(),
+            Some("Use as variable"),
+            "one column does"
+        );
+    }
+
+    /// Right-clicking a header raises the column menu, whose first row is the column's own name.
+    #[gpui_kit::test]
+    fn right_clicking_a_header_opens_the_column_menu(cx: &mut TestAppContext) {
+        let (handle, _) = open(cx, 4);
+        let bounds = table_bounds(cx, handle);
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+
+        right_click_at(&mut visual, header_at(bounds, 1.0));
+
+        assert!(menu_is_open(cx, handle));
+        assert_eq!(
+            menu_item(cx, handle, "export").as_deref(),
+            Some("Export column")
+        );
+        assert_eq!(
+            menu_item(cx, handle, "variable").as_deref(),
+            Some("Use as variable")
+        );
+    }
+
+    /// Clicking a submenu row dispatches its command, and the scope carries through: a
+    /// right-click on one cell copies that row, as one `INSERT`.
+    #[gpui_kit::test]
+    fn copying_a_row_as_sql_writes_one_insert(cx: &mut TestAppContext) {
+        let (handle, _) = open(cx, 4);
+        let bounds = table_bounds(cx, handle);
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+
+        right_click_at(&mut visual, cell_at(bounds, 1.0, 0.0));
+        choose_format(cx, handle, "copy", "sql");
+
+        let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        assert_eq!(
+            copied.as_deref(),
+            Some("INSERT INTO \"users\" (\"id\", \"name\") VALUES (1, 'row 1');"),
+            "the clicked row alone, quoted for the dialect"
+        );
+    }
+
+    /// The menu acts on the selection when the click is inside it, so the same command copies
+    /// every selected row.
+    #[gpui_kit::test]
+    fn copying_a_selected_band_as_csv_takes_every_row(cx: &mut TestAppContext) {
+        let (handle, _) = open(cx, 4);
+        let bounds = table_bounds(cx, handle);
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+
+        shift_click_at(&mut visual, cell_at(bounds, 0.0, 0.0));
+        shift_click_at(&mut visual, cell_at(bounds, 1.0, 0.0));
+        right_click_at(&mut visual, cell_at(bounds, 1.0, 0.0));
+        assert_eq!(
+            menu_item(cx, handle, "copy").as_deref(),
+            Some("Copy 2 rows")
+        );
+
+        choose_format(cx, handle, "copy", "csv");
+
+        let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        assert_eq!(
+            copied.as_deref(),
+            Some("id;name\n\"0\";\"row 0\"\n\"1\";\"row 1\""),
+            "both selected rows, in the frozen CSV shape"
+        );
+    }
+
+    /// A cell becomes a variable holding its **raw** value; a column becomes a list of SQL
+    /// literals, so it drops straight into an `IN (…)`. That difference is the reference's.
+    #[gpui_kit::test]
+    fn a_cell_becomes_a_raw_variable_and_a_column_a_quoted_list(cx: &mut TestAppContext) {
+        let (handle, workspace) = open(cx, 3);
+        let bounds = table_bounds(cx, handle);
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+
+        right_click_at(&mut visual, cell_at(bounds, 1.0, 1.0));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click(
+                SharedString::from(format!("{}-menu-variable", result_node())),
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            variable_rows(cx, &workspace),
+            vec![(
+                "name".to_string(),
+                peek_document::VariableValue::One("row 1".to_string())
+            )],
+            "the cell's own text, unquoted"
+        );
+
+        // And now the whole column, from its header.
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        right_click_at(&mut visual, header_at(bounds, 1.0));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click(
+                SharedString::from(format!("{}-menu-variable", result_node())),
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        let rows = variable_rows(cx, &workspace);
+        assert_eq!(rows.len(), 2, "a second variable node, not a rewrite");
+        assert!(
+            rows.iter().any(|(_, value)| *value
+                == peek_document::VariableValue::Many(vec![
+                    "'row 0'".to_string(),
+                    "'row 1'".to_string(),
+                    "'row 2'".to_string(),
+                ])),
+            "every row of the column, SQL-quoted: {rows:?}"
+        );
+    }
+
+    /// Every variable node on the page, as `(name, value)`.
+    fn variable_rows(
+        cx: &mut TestAppContext,
+        workspace: &gpui_kit::Entity<WorkspaceView>,
+    ) -> Vec<(String, peek_document::VariableValue)> {
+        cx.update(|cx| {
+            let document = workspace.read(cx).document(cx);
+            let document = document.read(cx);
+            document
+                .nodes()
+                .iter()
+                .filter_map(|node| peek_document::VariableData::get(&node.kind))
+                .flat_map(|data| data.rows.clone())
+                .map(|row| (row.name, row.value))
+                .collect()
+        })
+    }
+
+    /// Escape takes the menu down before it reaches anything the user could lose.
+    #[gpui_kit::test]
+    fn escape_closes_the_context_menu(cx: &mut TestAppContext) {
+        let (handle, _) = open(cx, 4);
+        let bounds = table_bounds(cx, handle);
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+
+        right_click_at(&mut visual, cell_at(bounds, 1.0, 0.0));
+        assert!(menu_is_open(cx, handle));
+
+        cx.update_window(handle.into(), |_, window, cx| window.press("escape", cx))
+            .unwrap();
+        assert!(!menu_is_open(cx, handle));
+    }
+
+    /// The toolbar's Chart button places a chart node and wires it to the result. The button
+    /// dispatches the command the palette dispatches, so this covers both.
+    #[gpui_kit::test]
+    fn charting_from_the_toolbar_places_a_chart_node(cx: &mut TestAppContext) {
+        let (handle, workspace) = open(cx, 4);
+        // The default fixture is an `id` and a name, neither of which is worth plotting.
+        cx.update_window(handle.into(), |_, window, cx| {
+            workspace.read(cx).document(cx).update(cx, |document, cx| {
+                document.set_result(result_node(), plottable());
+                cx.notify();
+            });
+            window.render_frame(cx);
+            window.click(SharedString::from(format!("{}-chart", result_node())), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        let chart = NodeId::chart_of(&result_node());
+        cx.update(|cx| {
+            let document = workspace.read(cx).document(cx);
+            let document = document.read(cx);
+            assert!(
+                document.node(&chart).is_some(),
+                "a chart node was placed for the result"
+            );
+            assert!(
+                document
+                    .edges()
+                    .iter()
+                    .any(|edge| edge.source == result_node() && edge.target == chart),
+                "and it is wired to the result that fed it"
+            );
+        });
+    }
+
+    /// `canChart`: a result with nothing numeric in it has nothing to plot, and the button says
+    /// so by being unavailable rather than by making an empty chart.
+    #[gpui_kit::test]
+    fn a_result_with_no_numeric_column_cannot_be_charted(cx: &mut TestAppContext) {
+        let (handle, workspace) = open(cx, 4);
+        cx.update_window(handle.into(), |_, window, cx| {
+            workspace.read(cx).document(cx).update(cx, |document, cx| {
+                document.set_result(
+                    result_node(),
+                    ResultSet::new(
+                        vec![Column::new("name", "TEXT")],
+                        vec![vec![Cell::Text("only words".to_string())]],
+                    ),
+                );
+                cx.notify();
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        let chartable = cx.update(|cx| {
+            workspace
+                .read(cx)
+                .result_inner(&result_node(), cx)
+                .map(|table| table.read(cx).chartable(cx))
+        });
+        assert_eq!(chartable, Some(false));
+    }
+
+    /// A column of keys plots the row numbers, so `canChart` excludes `id` and `*_id` — which is
+    /// every column of the default fixture but `id` itself.
+    #[gpui_kit::test]
+    fn an_identifier_column_alone_is_not_worth_charting(cx: &mut TestAppContext) {
+        let (handle, workspace) = open(cx, 4);
+        cx.update_window(handle.into(), |_, window, cx| {
+            workspace.read(cx).document(cx).update(cx, |document, cx| {
+                document.set_result(
+                    result_node(),
+                    ResultSet::new(
+                        vec![Column::new("user_id", "INT4"), Column::new("name", "TEXT")],
+                        vec![vec![Cell::Int(1), Cell::Text("a".to_string())]],
+                    ),
+                );
+                cx.notify();
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        let chartable = cx.update(|cx| {
+            workspace
+                .read(cx)
+                .result_inner(&result_node(), cx)
+                .map(|table| table.read(cx).chartable(cx))
+        });
+        assert_eq!(chartable, Some(false));
     }
 
     /// `Page::Search` is bound page-wide and the result node handles it too, so one keypress

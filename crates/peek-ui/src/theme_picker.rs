@@ -24,6 +24,9 @@ pub(crate) fn open(
         .position(|id| *id == current)
         .unwrap_or(0);
     state.update(cx, |state, cx| {
+        // Clearing first: the state is retained between opens, and a leftover query both
+        // filters the list and can hide the row the current theme is about to select.
+        state.set_query("", window, cx);
         state.set_selected_index(Some(IndexPath::new(selected)), window, cx);
     });
 

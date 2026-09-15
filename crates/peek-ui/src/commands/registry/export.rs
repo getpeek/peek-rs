@@ -1,5 +1,8 @@
 //! Exporting a selected result node's rows to a file the user picks a directory for.
 //!
+//! Every *selected result node* gets a file, which is what separates these from `Result::Export*`
+//! — those act on one table and on whatever part of it is picked out.
+//!
 //! Both handlers live on `CanvasView` (`canvas/dispatch/execution.rs`) rather than on the
 //! result node: the palette dispatches through the canvas focus handle, which is an ancestor
 //! of node elements, so a node-only handler would never be reached.

@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use gpui_kit::{App, Entity, Window};
+use gpui_kit::{App, Entity, WeakEntity, Window};
 use peek_canvas::Document;
 use peek_document::{Node, NodeId, NodeKind};
 
@@ -41,10 +41,11 @@ impl NodeState {
     /// editors can keep a [`gpui_kit::WeakEntity`] and write back from their own handlers.
     fn for_node(
         node: &Node,
-        document: &Entity<Document>,
+        owners: (&Entity<Document>, &WeakEntity<crate::canvas::CanvasView>),
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Self> {
+        let (document, canvas) = owners;
         match &node.kind {
             NodeKind::Agent(data) => Some(Self::Agent(agent::AgentState::new(
                 &node.id, data, document, window, cx,
@@ -59,7 +60,11 @@ impl NodeState {
                 &node.id, document, window, cx,
             ))),
             NodeKind::Result(data) => Some(Self::Result(result::ResultState::new(
-                &node.id, data, document, window, cx,
+                &node.id,
+                data,
+                (document, canvas),
+                window,
+                cx,
             ))),
             _ => None,
         }
@@ -69,6 +74,9 @@ impl NodeState {
 #[derive(Debug)]
 pub(crate) struct NodeStates {
     entries: HashMap<NodeId, NodeState>,
+    /// The view these states belong to. A result node raises its right-click menu on the canvas
+    /// rather than inside itself, so it needs a way back up; weak, because the canvas owns this.
+    canvas: WeakEntity<crate::canvas::CanvasView>,
     /// The canvas' document, which never changes for the life of the view; injected once
     /// rather than threaded through `get` on every frame.
     document: Entity<Document>,
@@ -77,9 +85,13 @@ pub(crate) struct NodeStates {
 }
 
 impl NodeStates {
-    pub(crate) fn new(document: Entity<Document>) -> Self {
+    pub(crate) fn new(
+        document: Entity<Document>,
+        canvas: WeakEntity<crate::canvas::CanvasView>,
+    ) -> Self {
         Self {
             entries: HashMap::new(),
+            canvas,
             document,
             pruned_at: None,
         }
@@ -97,7 +109,8 @@ impl NodeStates {
         cx: &mut App,
     ) -> Option<&NodeState> {
         if !self.entries.contains_key(&node.id)
-            && let Some(state) = NodeState::for_node(node, &self.document, window, cx)
+            && let Some(state) =
+                NodeState::for_node(node, (&self.document, &self.canvas), window, cx)
         {
             self.entries.insert(node.id.clone(), state);
         }

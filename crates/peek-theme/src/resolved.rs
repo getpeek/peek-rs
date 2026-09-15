@@ -16,6 +16,8 @@ impl From<Color> for Hsla {
 const REST_OPACITY: f32 = 0.7;
 /// `.connection-active` brightens an edge touching a selected node.
 const ACTIVE_WHITE_MIX: f32 = 0.38;
+/// The radius `Result.css` gives the outer corners of a cell-selection outline.
+const SELECTION_RADIUS: f32 = 7.0;
 
 /// How an edge is drawn right now (`node.css`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +104,12 @@ pub struct PeekTheme {
     pub radius_node: Pixels,
     pub radius_card: Pixels,
     pub radius_pill: Pixels,
+    /// The corner a selection outline turns inside a result table.
+    ///
+    /// Derived rather than authored: `Result.css` spells `7px` literally on
+    /// `td.sel-top.sel-left::after` and its three siblings, in every theme, so six identical
+    /// `ThemeSpec` entries would say nothing a constant does not.
+    pub radius_selection: Pixels,
     pub node_frame: ResolvedFrame,
     pub type_indicator: TypeIndicator,
 }
@@ -170,6 +178,7 @@ impl PeekTheme {
             radius_node: px(spec.radius_node),
             radius_card: px(spec.radius_card),
             radius_pill: px(spec.radius_pill),
+            radius_selection: px(SELECTION_RADIUS),
             node_frame: match spec.node_frame {
                 NodeFrame::Plain => ResolvedFrame::Plain,
                 NodeFrame::Brackets {

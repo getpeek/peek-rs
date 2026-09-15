@@ -167,10 +167,14 @@ fn color_entries(spec: &ThemeSpec) -> Vec<(&'static str, Color)> {
         ("list.even.background", spec.node_bg),
         ("list.head.background", spec.node_bg_2),
         ("table.background", spec.node_bg),
-        ("table.head.background", spec.node_bg_2),
+        // `Result.css` puts the head on the node's own background, not a raised one: the column
+        // names read as labels over the rows rather than as a separate bar.
+        ("table.head.background", spec.node_bg),
         ("table.head.foreground", spec.fg_muted),
         ("table.row.border", spec.node_border),
-        ("table.hover.background", row_selected),
+        // Hover is `--pk-node-bg-2` and selection is `--pk-row-selected-bg`. They used to be the
+        // same colour here, which left a selected row indistinguishable from a hovered one.
+        ("table.hover.background", spec.node_bg_2),
         ("table.active.background", spec.accent_bg),
         ("table.active.border", spec.accent_line),
         ("table.even.background", spec.node_bg),
