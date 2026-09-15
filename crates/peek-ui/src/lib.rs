@@ -53,10 +53,14 @@ pub struct Launch {
     /// Whether this run may write to `~/peek`. Opt-in while the TypeScript app still owns the
     /// same files; it autosaves on its own three-second debounce.
     pub persistence: PersistenceMode,
+    /// Whether the canvas may trade detail for frame time. Opt-in: without it every node
+    /// builds its real body at every zoom, which is what the level of detail in
+    /// [`peek_canvas::lod`] otherwise stops doing once a card is too small to read.
+    pub performance: bool,
 }
 
 impl Launch {
-    /// Parses `--workspace <name> --connection <name> [--write | --read-only]`.
+    /// Parses `--workspace <name> --connection <name> [--write | --read-only] [--performance]`.
     #[must_use]
     pub fn from_args(args: impl IntoIterator<Item = String>) -> Self {
         let mut launch = Self::default();
@@ -67,6 +71,7 @@ impl Launch {
                 "--connection" => launch.connection = args.next(),
                 "--write" => launch.persistence = PersistenceMode::ReadWrite,
                 "--read-only" => launch.persistence = PersistenceMode::ReadOnly,
+                "--performance" => launch.performance = true,
                 _ => log::warn!("peek: ignoring unknown argument {arg:?}"),
             }
         }
@@ -75,14 +80,16 @@ impl Launch {
 }
 
 /// Installs everything a window needs before it opens: gpui-kit, the theme globals, the
-/// keymap and the app-level actions. Tests call this instead of [`run`].
+/// keymap and the app-level actions, as if launched with no arguments. Tests call this
+/// instead of [`run`].
 pub fn init(config: &PeekConfig, cx: &mut gpui_kit::App) {
-    init_with(config, PersistenceMode::default(), cx);
+    init_with(config, &Launch::default(), cx);
 }
 
-fn init_with(config: &PeekConfig, persistence: PersistenceMode, cx: &mut gpui_kit::App) {
+/// [`init`], for a test that needs the launch options a flag would have set.
+pub fn init_with(config: &PeekConfig, launch: &Launch, cx: &mut gpui_kit::App) {
     gpui_kit::init(cx);
-    settings::Settings::init(config.clone(), persistence, cx);
+    settings::Settings::init(config.clone(), launch, cx);
     register_sql_grammar();
     node::query::language::SqlLanguage::init(cx);
     database::Database::init(cx);
@@ -123,7 +130,7 @@ pub fn run(launch: Launch) {
         if let Err(error) = PeekConfig::ensure_initialized_on_disk(launch.persistence) {
             log::warn!("peek: {error}");
         }
-        init_with(&config, launch.persistence, cx);
+        init_with(&config, &launch, cx);
 
         let bounds = Bounds::centered(None, size(px(1280.0), px(840.0)), cx);
         let options = WindowOptions {

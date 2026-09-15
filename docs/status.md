@@ -518,6 +518,7 @@ bump the revision, so they never schedule a write.
 ```
 cargo run -- --workspace <name> --connection <name>   # defaults to the first workspace/connection in settings.json
 cargo run -- --write                                  # enables autosave; read-only otherwise
+cargo run -- --performance                            # level of detail on: distant nodes drop their bodies
 cargo test --workspace                                # 676 tests, a few seconds after the first build
 cargo test -p peek-config -p peek-document -p peek-canvas   # the gpui-free crates, seconds
 cargo clippy --workspace --all-targets -- -D warnings
@@ -580,7 +581,9 @@ node per frame, and one by every node with text:
    caches on the exact font size. `peek_canvas::render_scale` snaps the content scale to a
    ladder; see `docs/canvas.md`, "Node zoom strategy".
 
-Then `peek_canvas::lod` stops building bodies below zoom 0.32 at all.
+Then `peek_canvas::lod` stops building bodies below zoom 0.32 at all — but only under
+`--performance`. Without the flag the canvas draws every body at every zoom; the tier trades
+away detail, so it is opt-in and the benchmark below turns it on explicitly.
 
 `cargo test -p peek-ui --test frame_cost --release -- --ignored --nocapture` measures it: 24
 result nodes of 2,000 × 8 cells, pinched from 100 % to 10 %. **39.5 ms a frame before, 30.8 after

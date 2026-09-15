@@ -208,7 +208,7 @@ card can sit up to ~3 % off the card around it, which is below what the eye reso
 positions, edges, hit testing and the selection ring all still use the exact zoom, so nothing
 drifts relative to anything else.
 
-**Below `lod::REDUCE_BELOW` (0.32) a node draws its shell and no body**, coming back at
+**Under `--performance`, below `lod::REDUCE_BELOW` (0.32) a node draws its shell and no body**, coming back at
 `RESTORE_ABOVE` (0.38); the gap is hysteresis, so a slow zoom crosses once instead of rebuilding
 every visible body twice a frame. Culling bounds the work only while nodes leave the viewport,
 and zooming out does the reverse — more cards fit the screen the further back the camera goes —
@@ -218,6 +218,11 @@ node while focus sits anywhere but the canvas, which means an editor owns it. A 
 also not allowed to *create* retained state, so zooming out over a page of query nodes does not
 open a language-server document for each one. The reference draws the same line at 0.35
 (`wayfinding/crossFade.ts`), where it stops dimming nodes and hands the board to region beacons.
+
+Without the flag none of that happens: `CanvasView::resolved_detail` returns `Detail::Full`
+before it looks at the camera at all, and every node builds its real body at every zoom. The
+trade the tier makes is real — a page of shells is harder to recognise than a page of nodes —
+so it is the user's to ask for, not the default.
 
 The grid thins the same way: `grid::grid_step` doubles the world gap until dots are ≥ 12 px
 apart, so it fades out instead of turning into noise.

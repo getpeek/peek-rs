@@ -237,13 +237,19 @@ impl CanvasView {
     /// any route — the Delete key, undo, MCP, or a page switch.
     /// The detail tier for this frame.
     ///
-    /// Held at [`Detail::Full`] whenever focus is somewhere other than the canvas itself, which
+    /// Held at [`Detail::Full`] unless the run was launched with `--performance`: dropping the
+    /// body of a distant node is a trade, and the default side of it is the honest canvas.
+    ///
+    /// Held there too whenever focus is somewhere other than the canvas itself, which
     /// means an editor owns it. Dropping that editor's element mid-edit would kill its focus
     /// handle and put the caret back to wherever it lands on the way in; `reclaim_focus` keeps
     /// that from breaking the key bindings, but it cannot put the caret back. It costs nothing
     /// in practice — a camera far enough out to reduce a node is too far out to read one, let
     /// alone type into it.
     fn resolved_detail(&self, window: &Window, cx: &App) -> Detail {
+        if !crate::settings::Settings::performance(cx) {
+            return Detail::Full;
+        }
         if window
             .focused(cx)
             .is_some_and(|focused| focused != self.focus_handle)

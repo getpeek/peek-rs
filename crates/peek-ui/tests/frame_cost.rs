@@ -20,7 +20,7 @@ use gpui_kit::{
     VisualTestContext, WindowHandle, point, px, size,
 };
 use peek_document::{CanvasDocument, Cell, Column, NodeId, ResultSet};
-use peek_ui::WorkspaceView;
+use peek_ui::{Launch, WorkspaceView};
 
 const NODES: usize = 24;
 const ROWS: usize = 2_000;
@@ -64,7 +64,13 @@ fn open(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<WorkspaceView>) 
     cx.update(|cx| {
         let mut config = peek_config::PeekConfig::default();
         config.theme = peek_config::ThemeId::Midday;
-        peek_ui::init(&config, cx);
+        // The whole point of this benchmark is the relief `--performance` buys, so it measures
+        // the canvas that flag asks for, not the default one.
+        let launch = Launch {
+            performance: true,
+            ..Launch::default()
+        };
+        peek_ui::init_with(&config, &launch, cx);
     });
     let json = document_json();
     let set = rows();

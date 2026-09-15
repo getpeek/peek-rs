@@ -1773,6 +1773,33 @@ mod render_tests {
 
     // ---- level of detail ----------------------------------------------------------------
 
+    /// Turns `--performance` on for a window already open, and draws the frame that answers to
+    /// it. The three tests below are the ones about the trade that flag makes; every other test
+    /// in this module runs the default canvas, which builds every body at every zoom.
+    fn performance(cx: &mut TestAppContext, handle: gpui_kit::WindowHandle<Root>) {
+        cx.update(|cx| crate::settings::Settings::set_performance(true, cx));
+        cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+    }
+
+    /// And without the flag the same camera keeps every body: the distance that reduces a node
+    /// under `--performance` is a distance the default canvas draws in full.
+    #[gpui_kit::test]
+    fn a_result_too_small_to_read_still_builds_its_table_by_default(cx: &mut TestAppContext) {
+        let (handle, _workspace) = open_zoomed(cx, 200, 0.2);
+        let table = cx
+            .update_window(handle.into(), |_, window, _| {
+                window
+                    .try_find(SharedString::from(format!("{}-table", result_node())))
+                    .is_some()
+            })
+            .unwrap();
+        assert!(
+            table,
+            "the table must be built at this zoom without the flag"
+        );
+    }
+
     /// Past the point where a card is readable, the body stops being built: at this distance a
     /// 600x440 node is under 200 px wide, and the toolbar plus a few hundred cells inside it are
     /// laid out for nobody. The shell stays, so the node is still findable and still says what
@@ -1780,6 +1807,7 @@ mod render_tests {
     #[gpui_kit::test]
     fn a_result_too_small_to_read_builds_no_table(cx: &mut TestAppContext) {
         let (handle, _workspace) = open_zoomed(cx, 200, 0.2);
+        performance(cx, handle);
         let (card, table) = cx
             .update_window(handle.into(), |_, window, _| {
                 (
@@ -1801,6 +1829,7 @@ mod render_tests {
     #[gpui_kit::test]
     fn a_selected_result_keeps_its_table_however_far_out_the_camera_is(cx: &mut TestAppContext) {
         let (handle, workspace) = open_zoomed(cx, 200, 0.2);
+        performance(cx, handle);
         cx.update(|cx| {
             workspace.read(cx).document(cx).update(cx, |document, cx| {
                 document.select_only([result_node()]);
@@ -1824,6 +1853,7 @@ mod render_tests {
     #[gpui_kit::test]
     fn a_reduced_result_still_has_its_rows_when_the_camera_comes_back(cx: &mut TestAppContext) {
         let (handle, workspace) = open(cx, 5);
+        performance(cx, handle);
         assert_eq!(dump(cx, &workspace, 0..5).1.len(), 5);
 
         // Driven through real pinches: `Page::viewport` only seeds the camera when the view is

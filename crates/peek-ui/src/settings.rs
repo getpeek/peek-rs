@@ -9,19 +9,23 @@
 use gpui_kit::{App, BorrowAppContext, Global};
 use peek_config::{ConfigError, PeekConfig, PersistenceMode};
 
+use crate::Launch;
+
 #[derive(Debug)]
 pub(crate) struct Settings {
     config: PeekConfig,
     persistence: PersistenceMode,
+    performance: bool,
 }
 
 impl Global for Settings {}
 
 impl Settings {
-    pub(crate) fn init(config: PeekConfig, persistence: PersistenceMode, cx: &mut App) {
+    pub(crate) fn init(config: PeekConfig, launch: &Launch, cx: &mut App) {
         cx.set_global(Self {
             config,
-            persistence,
+            persistence: launch.persistence,
+            performance: launch.performance,
         });
     }
 
@@ -33,6 +37,20 @@ impl Settings {
     /// `load_document` and the autosave that must not exist under `ReadOnly`.
     pub(crate) fn persistence(cx: &App) -> PersistenceMode {
         cx.global::<Self>().persistence
+    }
+
+    /// Whether `--performance` was given: the canvas drops the body of a node the camera has
+    /// zoomed too far out to read. Off by default, because the detail it trades away is real —
+    /// a page of shells is harder to recognise than a page of nodes.
+    pub(crate) fn performance(cx: &App) -> bool {
+        cx.global::<Self>().performance
+    }
+
+    /// Turns that trade on for a test that is about it. `--performance` is a launch option, so
+    /// this is the only way to move it once `init` has run.
+    #[cfg(test)]
+    pub(crate) fn set_performance(enabled: bool, cx: &mut App) {
+        cx.update_global::<Self, _>(|settings, _| settings.performance = enabled);
     }
 
     /// Whether a write would reach disk at all, so a form can disable Save and say why rather
