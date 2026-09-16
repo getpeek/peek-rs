@@ -111,7 +111,7 @@ impl WorkspaceView {
         // Opt-in, and only at startup: the reference says as much in its own settings, and a
         // server that appears mid-session would not be forwarded to an already-running agent.
         if view.config.ai.mcp.enable {
-            view.mcp = McpBridge::start(&view.canvas, view.config.ai.mcp.port, window, cx);
+            view.mcp = McpBridge::start(cx.weak_entity(), view.config.ai.mcp.port, window, cx);
             if let Some(bridge) = &view.mcp {
                 crate::node::agent::backend::Agents::set_mcp_url(bridge.url(), cx);
             }

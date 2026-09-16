@@ -137,6 +137,40 @@ fn switching_loads_the_other_connections_document(cx: &mut TestAppContext) {
     );
 }
 
+/// The tool surface follows the switch. The MCP drain answers every agent call through
+/// `run_tool`, so a canvas captured anywhere on that path would keep an agent editing the
+/// document that was open when the window opened — invisibly, since nothing renders it.
+#[gpui_kit::test]
+fn a_tool_call_after_a_switch_lands_on_the_new_document(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    switch(handle, &workspace, ("no-such-workspace", "no-such-db"), cx);
+
+    let reply = cx
+        .update_window(handle.into(), |_, window, cx| {
+            workspace.update(cx, |view, cx| {
+                view.run_tool(
+                    "create_text_node",
+                    &serde_json::json!({ "text": "from the agent", "position": [0.0, 0.0] }),
+                    window,
+                    cx,
+                )
+            })
+        })
+        .unwrap();
+
+    let id = peek_document::NodeId::from(reply["nodeId"].as_str().expect("the node was created"));
+    let (count, landed) = cx.update(|cx| {
+        let document = workspace.read(cx).document(cx);
+        let document = document.read(cx);
+        (document.nodes().len(), document.node(&id).is_some())
+    });
+    assert_eq!(
+        count, 1,
+        "the empty document gained exactly the agent's node"
+    );
+    assert!(landed, "the node is in the document the window is showing");
+}
+
 /// The canvas is rebuilt around the new document, so the chrome must still dispatch through a
 /// live focus handle afterwards — the reason `switch_connection` reuses the old one.
 #[gpui_kit::test]

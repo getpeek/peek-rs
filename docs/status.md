@@ -806,7 +806,9 @@ listeners, the HUD and the toolbar are rebuilt every frame, which is cheap next 
 - **An agent can drive the canvas.** With `ai.mcp.enable` set, `peek-mcp` serves the 21 canvas
   tools on `127.0.0.1:<port>` and the drain answers each one against the live document. Verified
   end to end over HTTP: `get_db_schema` returns the connection's real DDL, `create_text_node`
-  places a node, and an unknown id comes back as the reference's own error string.
+  places a node, and an unknown id comes back as the reference's own error string. The drain holds
+  the workspace, not its canvas, so switching connection moves the agent to the new document
+  rather than leaving it editing an orphaned one.
 - **Regions have a mutation API but no renderer.** `group_nodes`, `add_to_region` and
   `remove_region` write real regions with exclusive membership and undo; nothing draws them yet,
   so an agent that groups nodes leaves no visible trace. That is milestone order, not a bug.
