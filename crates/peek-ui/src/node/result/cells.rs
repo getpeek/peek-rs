@@ -113,16 +113,21 @@ fn marker(label: &'static str, color: Hsla) -> AnyElement {
         .into_any_element()
 }
 
-/// `{…} 3 keys` / `[…] 7 items`, so the shape and size of a JSON value read at a glance without
-/// the row having to grow to hold it. A scalar in a JSON column shows as itself.
+/// `{ id: 42, user: {…}, tags: […] }`, so a JSON cell says what is *in* it without the row
+/// having to grow to hold it.
+///
+/// This used to be `{…} 3 keys`, which describes only the shape — two rows holding completely
+/// different objects read identically, and the only way to tell them apart was to open each one.
+/// The preview is bounded by construction (`json::preview`), so it is no more expensive on a
+/// large value than on a small one.
 fn summary(value: &Cell, theme: &PeekTheme) -> AnyElement {
-    let text = value
-        .json_summary()
-        .unwrap_or_else(|| value.to_display_string());
+    let Cell::Json(json) = value else {
+        return plain(&value.to_display_string(), theme);
+    };
     div()
         .truncate()
         .text_color(theme.fg_muted)
-        .child(text)
+        .child(super::json::preview(json))
         .into_any_element()
 }
 

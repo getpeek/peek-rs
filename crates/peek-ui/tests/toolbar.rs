@@ -7,16 +7,23 @@ use gpui_kit::component::Root;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{AppContext, Entity, TestAppContext, WindowHandle, px, size};
 use peek_document::CanvasDocument;
-use peek_ui::WorkspaceView;
 use peek_ui::commands;
+use peek_ui::{Launch, WorkspaceView};
 
 const FIXTURE: &str = include_str!("../../peek-document/tests/fixtures/plock-local.json");
 
 fn open(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<WorkspaceView>) {
+    open_with(cx, &Launch::default())
+}
+
+fn open_with(
+    cx: &mut TestAppContext,
+    launch: &Launch,
+) -> (WindowHandle<Root>, Entity<WorkspaceView>) {
     cx.update(|cx| {
         let mut config = peek_config::PeekConfig::default();
         config.theme = peek_config::ThemeId::Midday;
-        peek_ui::init(&config, cx);
+        peek_ui::init_with(&config, launch, cx);
     });
     let mut workspace = None;
     let handle = cx.open_window(size(px(1200.0), px(800.0)), |window, cx| {
@@ -305,6 +312,47 @@ fn a_chrome_tooltip_context_resolves_the_binding_the_keyboard_uses(cx: &mut Test
                 action.name()
             );
         }
+    })
+    .unwrap();
+}
+
+/// The frame-rate readout is a debugging instrument, so it exists only when asked for — and
+/// `--fps` is a launch flag, which means the only way to see either answer is to open a window
+/// each way.
+#[gpui_kit::test]
+fn the_frame_rate_readout_is_behind_its_flag(cx: &mut TestAppContext) {
+    let (handle, _) = open(cx);
+    cx.update_window(handle.into(), |_, window, _| {
+        assert!(
+            window.try_find("fps-readout").is_none(),
+            "an unflagged run shows no readout"
+        );
+        assert!(
+            window.try_find("zoom-indicator").is_some(),
+            "the cluster is up"
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_frame_rate_readout_appears_under_the_flag(cx: &mut TestAppContext) {
+    let launch = Launch {
+        fps: true,
+        ..Launch::default()
+    };
+    let (handle, _) = open_with(cx, &launch);
+    cx.update_window(handle.into(), |_, window, _| {
+        let readout = window.try_find("fps-readout").expect("--fps was given");
+        let label = readout
+            .label()
+            .expect("the readout names itself for a screen reader");
+        // The rate itself is whatever the harness managed, which is no business of a test —
+        // what is pinned is that it reports one of the two shapes and never a bare number.
+        assert!(
+            label == "idle" || (label.contains(" fps ") && label.ends_with(" ms")),
+            "expected `idle` or `<n> fps <n> ms`, got {label:?}"
+        );
     })
     .unwrap();
 }

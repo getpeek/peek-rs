@@ -56,12 +56,29 @@ impl ResultTable {
         cx.notify();
     }
 
-    pub(super) fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+    /// Drops the open edit. Called by the canvas as it takes the JSON panel down, so it must
+    /// not reach back for the panel itself — that would be a re-entrant update on the canvas.
+    pub(crate) fn cancel_edit(&mut self, cx: &mut Context<Self>) {
         self.table.update(cx, |table, cx| {
             table.delegate_mut().end_edit();
             cx.notify();
         });
         cx.notify();
+    }
+
+    /// Drops the open edit *and* whatever surface was showing it.
+    ///
+    /// The node's own escape rule and every commit go through here; only the canvas, which has
+    /// already taken the panel down, calls [`Self::cancel_edit`] directly.
+    pub(super) fn dismiss_edit(&mut self, cx: &mut Context<Self>) {
+        // Taking the panel down cancels the edit behind it, so only an edit that had no panel —
+        // the in-cell field — still needs cancelling here.
+        if let Some(canvas) = self.canvas.upgrade()
+            && canvas.update(cx, crate::canvas::CanvasView::close_json_editor)
+        {
+            return;
+        }
+        self.cancel_edit(cx);
     }
 
     /// The table this result can be edited through.
@@ -75,7 +92,7 @@ impl ResultTable {
     /// Builds the `UPDATE`, runs it, and re-runs the query behind the result.
     ///
     /// Every refusal happens before the database is touched.
-    pub(super) fn commit_edit(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn commit_edit(&mut self, cx: &mut Context<Self>) {
         let Some(editing) = self.table.read(cx).delegate().editing().cloned() else {
             return;
         };
@@ -109,7 +126,7 @@ impl ResultTable {
                     this.set_edit_state(false, Some(message), cx);
                     return;
                 }
-                this.cancel_edit(cx);
+                this.dismiss_edit(cx);
                 // Re-run the query behind the result rather than re-issuing the SQL by hand:
                 // that re-resolves variables, re-places the rows and clears any error.
                 crate::execution::rerun_source(&document, &node, cx);
@@ -129,14 +146,8 @@ impl ResultTable {
             .editable_table()
             .ok_or(NotEditable::NotASingleTableSelect)?;
         let engine = Database::engine(cx);
-        let draft = self
-            .table
-            .read(cx)
-            .delegate()
-            .input()
-            .read(cx)
-            .value()
-            .to_string();
+        // Whichever editor is open: the in-cell field, or the JSON popover.
+        let draft = self.draft(cx);
 
         let state = self.table.read(cx);
         let delegate = state.delegate();

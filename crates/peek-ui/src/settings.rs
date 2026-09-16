@@ -16,6 +16,7 @@ pub(crate) struct Settings {
     config: PeekConfig,
     persistence: PersistenceMode,
     performance: bool,
+    fps: bool,
 }
 
 impl Global for Settings {}
@@ -26,6 +27,7 @@ impl Settings {
             config,
             persistence: launch.persistence,
             performance: launch.performance,
+            fps: launch.fps,
         });
     }
 
@@ -51,6 +53,13 @@ impl Settings {
     #[cfg(test)]
     pub(crate) fn set_performance(enabled: bool, cx: &mut App) {
         cx.update_global::<Self, _>(|settings, _| settings.performance = enabled);
+    }
+
+    /// Whether `--fps` was given: the zoom cluster carries a frame-rate readout, and the canvas
+    /// samples the wall clock once a frame to feed it. Read once, in `CanvasView::new`, because
+    /// the flag cannot move for the life of the process.
+    pub(crate) fn fps(cx: &App) -> bool {
+        cx.global::<Self>().fps
     }
 
     /// Whether a write would reach disk at all, so a form can disable Save and say why rather

@@ -57,10 +57,15 @@ pub struct Launch {
     /// builds its real body at every zoom, which is what the level of detail in
     /// [`peek_canvas::lod`] otherwise stops doing once a card is too small to read.
     pub performance: bool,
+    /// Whether the zoom cluster carries a frame-rate readout. Opt-in because it is a debugging
+    /// instrument, and because it is the one thing here that adds work to the frame loop: a
+    /// settle timer, so the reading can fall back to `idle` once the canvas stops drawing.
+    pub fps: bool,
 }
 
 impl Launch {
-    /// Parses `--workspace <name> --connection <name> [--write | --read-only] [--performance]`.
+    /// Parses
+    /// `--workspace <name> --connection <name> [--write | --read-only] [--performance] [--fps]`.
     #[must_use]
     pub fn from_args(args: impl IntoIterator<Item = String>) -> Self {
         let mut launch = Self::default();
@@ -72,6 +77,7 @@ impl Launch {
                 "--write" => launch.persistence = PersistenceMode::ReadWrite,
                 "--read-only" => launch.persistence = PersistenceMode::ReadOnly,
                 "--performance" => launch.performance = true,
+                "--fps" => launch.fps = true,
                 _ => log::warn!("peek: ignoring unknown argument {arg:?}"),
             }
         }
@@ -147,4 +153,60 @@ pub fn run(launch: Launch) {
         .expect("the main window opens");
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::Launch;
+    use peek_config::PersistenceMode;
+
+    /// `from_args` skips the first argument, which is the binary's own path.
+    fn parse(args: &[&str]) -> Launch {
+        let mut all = vec!["peek".to_string()];
+        all.extend(args.iter().map(|arg| (*arg).to_string()));
+        Launch::from_args(all)
+    }
+
+    #[test]
+    fn the_defaults_are_read_only_with_no_flags() {
+        let launch = parse(&[]);
+        assert_eq!(launch.persistence, PersistenceMode::ReadOnly);
+        assert!(!launch.performance);
+        assert!(!launch.fps);
+        assert_eq!(launch.workspace, None);
+    }
+
+    #[test]
+    fn the_named_workspace_and_connection_are_taken_as_pairs() {
+        let launch = parse(&["--workspace", "Plock", "--connection", "local"]);
+        assert_eq!(launch.workspace.as_deref(), Some("Plock"));
+        assert_eq!(launch.connection.as_deref(), Some("local"));
+    }
+
+    /// The three switches are independent: `--fps` must not imply the level-of-detail trade,
+    /// which would change what the readout is measuring.
+    #[test]
+    fn the_switches_do_not_imply_each_other() {
+        let launch = parse(&["--fps"]);
+        assert!(launch.fps);
+        assert!(!launch.performance);
+        assert_eq!(launch.persistence, PersistenceMode::ReadOnly);
+
+        let launch = parse(&["--performance"]);
+        assert!(launch.performance);
+        assert!(!launch.fps);
+
+        let launch = parse(&["--write", "--fps", "--performance"]);
+        assert!(launch.fps);
+        assert!(launch.performance);
+        assert_eq!(launch.persistence, PersistenceMode::ReadWrite);
+    }
+
+    /// An unknown argument is logged and skipped rather than taken as a value, so one typo does
+    /// not swallow the flag after it.
+    #[test]
+    fn an_unknown_argument_does_not_swallow_the_next_one() {
+        let launch = parse(&["--nonsense", "--fps"]);
+        assert!(launch.fps);
+    }
 }

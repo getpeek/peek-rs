@@ -30,7 +30,7 @@ use crate::commands::{
 use crate::mcp::McpBridge;
 use crate::title_bar::PeekTitleBar;
 use crate::title_bar::connection::ConnectionPill;
-use crate::title_bar::pages::PageTabs;
+use crate::title_bar::pages::{PageTabs, PagesPanel};
 use crate::title_bar::picker::{PickerEvent, PickerView};
 
 pub struct WorkspaceView {
@@ -50,6 +50,8 @@ pub struct WorkspaceView {
     picker: Entity<PickerView>,
     theme_picker: Entity<CommandState>,
     page_tabs: Entity<PageTabs>,
+    /// The pages picker, a full-window layer of its own — see `title_bar::pages::panel`.
+    pages_panel: Entity<PagesPanel>,
     persistence: PersistenceMode,
     ui_visible: bool,
     /// Repaints when the connection resolves. `Database` is a global mutated from a spawned
@@ -145,6 +147,8 @@ impl WorkspaceView {
         let canvas_focus = cx.focus_handle();
         let canvas = cx.new(|cx| CanvasView::new(document, canvas_focus.clone(), window, cx));
         let page_tabs = cx.new(|cx| PageTabs::new(canvas.clone(), canvas_focus.clone(), cx));
+        let pages_panel =
+            cx.new(|cx| PagesPanel::new(canvas.clone(), canvas_focus.clone(), window, cx));
         let palette = cx.new(|cx| CommandState::new(window, cx));
         // Weak, and taken before the view exists: the picker points back at the workspace it
         // switches, and a strong handle would be a cycle that never drops.
@@ -163,6 +167,7 @@ impl WorkspaceView {
             canvas,
             canvas_focus,
             page_tabs,
+            pages_panel,
             palette,
             picker,
             theme_picker,
@@ -224,6 +229,8 @@ impl WorkspaceView {
         canvas.update(cx, |canvas, cx| canvas.set_chrome_visible(visible, cx));
 
         self.page_tabs = cx.new(|cx| PageTabs::new(canvas.clone(), self.canvas_focus.clone(), cx));
+        self.pages_panel =
+            cx.new(|cx| PagesPanel::new(canvas.clone(), self.canvas_focus.clone(), window, cx));
         self.canvas = canvas;
         self.autosave = Self::autosave_for(&document, files, self.persistence, cx);
         self.title = SharedString::from(format!("{workspace} / {connection}"));
@@ -302,6 +309,12 @@ impl WorkspaceView {
         >,
     > {
         self.canvas.read(cx).result_table(node, cx)
+    }
+
+    /// The canvas, for the tests that drive its own chrome.
+    #[cfg(test)]
+    pub(crate) fn canvas_for_test(&self) -> &Entity<CanvasView> {
+        &self.canvas
     }
 
     /// The entity behind a result node, for tests.
@@ -691,9 +704,12 @@ impl Render for WorkspaceView {
                     PeekTitleBar::new(pill, self.page_tabs.clone(), self.canvas_focus.clone()),
                 ))
             })
-            // After the bar, so the scrim occludes the page tabs too, and before the dialog
-            // layer, so a palette opened over the picker still wins.
-            .when(self.ui_visible, |this| this.child(self.picker.clone()))
+            // After the bar, so each scrim occludes the chrome it was opened from, and before
+            // the dialog layer, so a palette opened over either picker still wins.
+            .when(self.ui_visible, |this| {
+                this.child(self.pages_panel.clone())
+                    .child(self.picker.clone())
+            })
             // `Root` owns dialogs, sheets and notifications but leaves mounting them to the
             // window's first view, so the palette dialog is rendered here.
             .children(Root::render_dialog_layer(window, cx))

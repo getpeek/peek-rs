@@ -25,6 +25,9 @@ use peek_ui::{Launch, WorkspaceView};
 const NODES: usize = 24;
 const ROWS: usize = 2_000;
 const COLUMNS: usize = 8;
+/// How many of the eight columns hold JSON in the `json` fixture. Three is what a real events
+/// or audit table looks like: a payload, some metadata, and a set of tags.
+const JSON_COLUMNS: usize = 3;
 
 fn document_json() -> String {
     let nodes: Vec<String> = (0..NODES)
@@ -60,7 +63,57 @@ fn rows() -> ResultSet {
     ResultSet::new(columns, body)
 }
 
-fn open(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<WorkspaceView>) {
+/// The same shape, but with three JSON columns.
+///
+/// The all-text fixture above cannot see the cost of a JSON cell at all — not the deep clone
+/// `render_td` used to make of every visible value, and not the preview each one renders — so
+/// every number it produced was silent about the column type that is most expensive to draw.
+fn json_rows() -> ResultSet {
+    let columns = (0..COLUMNS)
+        .map(|c| {
+            if c < JSON_COLUMNS {
+                Column::new(format!("column_{c}"), "JSONB")
+            } else {
+                Column::new(format!("column_{c}"), "VARCHAR")
+            }
+        })
+        .collect();
+    let body = (0..ROWS)
+        .map(|r| {
+            (0..COLUMNS)
+                .map(|c| {
+                    if c < JSON_COLUMNS {
+                        Cell::Json(payload(r, c))
+                    } else {
+                        Cell::Text(format!("value {r}:{c}"))
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    ResultSet::new(columns, body)
+}
+
+/// A twelve-key object with a nested object and an array, which is the shape a jsonb column of
+/// event metadata actually holds.
+fn payload(row: usize, column: usize) -> serde_json::Value {
+    serde_json::json!({
+        "id": row,
+        "column": column,
+        "kind": "checkout.completed",
+        "source": "web",
+        "session": format!("sess_{row:08}"),
+        "amount": format!("{row}.50"),
+        "currency": "SEK",
+        "live": row.is_multiple_of(2),
+        "note": null,
+        "actor": { "id": row, "email": format!("user{row}@example.com"), "role": "admin" },
+        "tags": ["checkout", "payment", "web"],
+        "trace": format!("{:064x}", row),
+    })
+}
+
+fn open(cx: &mut TestAppContext, set: &ResultSet) -> (WindowHandle<Root>, Entity<WorkspaceView>) {
     cx.update(|cx| {
         let mut config = peek_config::PeekConfig::default();
         config.theme = peek_config::ThemeId::Midday;
@@ -73,7 +126,6 @@ fn open(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<WorkspaceView>) 
         peek_ui::init_with(&config, &launch, cx);
     });
     let json = document_json();
-    let set = rows();
     let mut workspace = None;
     let handle = cx.open_window(size(px(1600.0), px(1000.0)), |window, cx| {
         let document = CanvasDocument::from_json(&json).unwrap();
@@ -95,8 +147,21 @@ fn open(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<WorkspaceView>) 
     (handle, workspace.unwrap())
 }
 
-fn sweep(cx: &mut TestAppContext, label: &str, factor: f32, steps: usize) {
-    let (handle, workspace) = open(cx);
+struct Sweep<'a> {
+    label: &'a str,
+    set: ResultSet,
+    factor: f32,
+    steps: usize,
+}
+
+fn sweep(cx: &mut TestAppContext, sweep: Sweep<'_>) {
+    let Sweep {
+        label,
+        set,
+        factor,
+        steps,
+    } = sweep;
+    let (handle, workspace) = open(cx, &set);
     cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
         .unwrap();
 
@@ -125,12 +190,44 @@ fn sweep(cx: &mut TestAppContext, label: &str, factor: f32, steps: usize) {
 #[gpui_kit::test]
 #[ignore = "benchmark"]
 fn zooming_out_over_result_nodes(cx: &mut TestAppContext) {
-    sweep(cx, "pinch out 1.0 -> 0.1", -0.03, 80);
+    sweep(
+        cx,
+        Sweep {
+            label: "text, pinch out 1.0 -> 0.1",
+            set: rows(),
+            factor: -0.03,
+            steps: 80,
+        },
+    );
 }
 
 /// A pinch that stays where nodes are readable: the cost with no LOD relief at all.
 #[gpui_kit::test]
 #[ignore = "benchmark"]
 fn zooming_within_the_readable_range(cx: &mut TestAppContext) {
-    sweep(cx, "pinch in 1.0 -> 4.0", 0.02, 70);
+    sweep(
+        cx,
+        Sweep {
+            label: "text, pinch in 1.0 -> 4.0",
+            set: rows(),
+            factor: 0.02,
+            steps: 70,
+        },
+    );
+}
+
+/// The readable range again, over JSON columns: the range where every visible cell parses,
+/// previews and draws, and where a regression in the JSON path would actually show.
+#[gpui_kit::test]
+#[ignore = "benchmark"]
+fn zooming_over_json_results(cx: &mut TestAppContext) {
+    sweep(
+        cx,
+        Sweep {
+            label: "json, pinch in 1.0 -> 4.0",
+            set: json_rows(),
+            factor: 0.02,
+            steps: 70,
+        },
+    );
 }

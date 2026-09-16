@@ -379,3 +379,127 @@ fn the_pages_picker_switches_pages(cx: &mut TestAppContext) {
     })
     .unwrap();
 }
+
+/// The picker in list mode is a search box first: `o`, then type, then Enter.
+#[gpui_kit::test]
+fn typing_in_the_pages_picker_narrows_it_and_enter_takes_the_best_match(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_as(cx, PageDisplay::List);
+    let quote = PageId::from("page_oeZif5Ta");
+    assert_ne!(active(cx, &workspace), quote, "not where we start");
+
+    cx.update_window(handle.into(), |_, window, cx| window.press("o", cx))
+        .unwrap();
+    cx.run_until_parked();
+    render(cx, handle);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.input("quote", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    render(cx, handle);
+
+    cx.update_window(handle.into(), |_, window, _| {
+        assert!(window.try_find(format!("page-row-{quote}")).is_some());
+        assert!(
+            window.try_find("page-row-page_KPyrjNSz").is_none(),
+            "a page the query does not match is gone from the list"
+        );
+    })
+    .unwrap();
+
+    cx.update_window(handle.into(), |_, window, cx| window.press("enter", cx))
+        .unwrap();
+    cx.run_until_parked();
+    render(cx, handle);
+
+    assert_eq!(active(cx, &workspace), quote);
+    cx.update_window(handle.into(), |_, window, _| {
+        assert!(
+            window.try_find("pages-list").is_none(),
+            "and closes behind it"
+        );
+    })
+    .unwrap();
+}
+
+/// The arrows walk the list from the page you are on, which is where the cursor starts.
+#[gpui_kit::test]
+fn the_arrow_keys_walk_the_pages_picker(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_as(cx, PageDisplay::List);
+    let ids = pages(cx, &workspace);
+    let start = ids
+        .iter()
+        .position(|id| id == &active(cx, &workspace))
+        .expect("the active page is in the list");
+    assert!(start > 0, "the fixture opens on a page with one above it");
+    let above = ids[start - 1].clone();
+
+    cx.update_window(handle.into(), |_, window, cx| window.press("o", cx))
+        .unwrap();
+    cx.run_until_parked();
+    render(cx, handle);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.press("up", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    assert_eq!(active(cx, &workspace), above);
+}
+
+/// Escape dismisses the panel and hands focus back to the canvas: a dead focus owner leaves
+/// every canvas binding silently not working.
+#[gpui_kit::test]
+fn escape_closes_the_pages_picker_and_hands_focus_back(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_as(cx, PageDisplay::List);
+    let before = active(cx, &workspace);
+
+    cx.update_window(handle.into(), |_, window, cx| window.press("o", cx))
+        .unwrap();
+    cx.run_until_parked();
+    render(cx, handle);
+
+    cx.update_window(handle.into(), |_, window, cx| window.press("escape", cx))
+        .unwrap();
+    cx.run_until_parked();
+    render(cx, handle);
+
+    assert_eq!(active(cx, &workspace), before, "nothing was picked");
+    cx.update_window(handle.into(), |_, window, _| {
+        assert!(window.try_find("pages-list").is_none());
+        assert_eq!(window.find("canvas").focused(), Some(true));
+    })
+    .unwrap();
+}
+
+/// The pill is the pointer half of `Page::OpenPicker`, and the scrim behind the panel is what
+/// makes a press outside it a dismissal rather than a canvas marquee.
+#[gpui_kit::test]
+fn the_pages_pill_opens_the_panel_and_the_scrim_closes_it(cx: &mut TestAppContext) {
+    let (handle, _) = open_as(cx, PageDisplay::List);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("pages-pill", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    render(cx, handle);
+    cx.update_window(handle.into(), |_, window, _| {
+        assert!(window.try_find("pages-list").is_some());
+    })
+    .unwrap();
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("pages-panel-scrim", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    render(cx, handle);
+    cx.update_window(handle.into(), |_, window, _| {
+        assert!(window.try_find("pages-list").is_none());
+    })
+    .unwrap();
+}

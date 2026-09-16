@@ -9,6 +9,7 @@ mod element;
 mod frame_stats;
 mod grid;
 mod hud;
+pub(crate) mod json_editor;
 mod jump;
 mod page_search;
 mod toolbar;
@@ -22,7 +23,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::{
     App, Bounds, Context, CursorStyle, Entity, FocusHandle, KeyDownEvent, KeyUpEvent, Modifiers,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels, ScrollDelta,
-    ScrollWheelEvent, SharedString, Subscription, TouchPhase, Window, div,
+    ScrollWheelEvent, SharedString, Subscription, Task, TouchPhase, Window, div,
 };
 use peek_canvas::camera::FitOptions;
 use peek_canvas::direction::{self, Direction};
@@ -44,7 +45,7 @@ use crate::title_bar::close_page;
 use convert::{to_pixel_bounds, to_pixel_point};
 use edges::EdgeItem;
 use element::{CanvasElement, NodeItem, Overlay};
-use frame_stats::{FrameStats, Phase};
+use frame_stats::{FrameStats, Phase, Reading};
 
 /// Screen-space slack around the viewport so nodes at the edge are built before they scroll in.
 const CULL_MARGIN_PX: f64 = 64.0;
@@ -89,6 +90,9 @@ pub(crate) struct CanvasView {
     page_search: Option<page_search::PageSearch>,
     /// The right-click menu a node raised, or `None` when none is open.
     context_menu: Option<context_menu::MenuState>,
+    /// The JSON editor raised by a result cell, or `None`. Chrome rather than content, so it
+    /// lives here beside the context menu — `canvas/json_editor.rs` says why.
+    json_editor: Option<json_editor::JsonEditorState>,
     /// The node a running placement drag created, which the rest of the drag resizes. The
     /// reducer tracks the gesture; the id lives here because the document mints it.
     placement: Option<NodeId>,
@@ -99,8 +103,12 @@ pub(crate) struct CanvasView {
     /// The force layout `View::Organize` and `View::Schema` run, or `None` when nothing is
     /// being arranged.
     organize: Option<OrganizeRun>,
-    /// Frame timings, inert unless `PEEK_FRAME_STATS=1`.
+    /// Frame timings, inert unless `PEEK_FRAME_STATS=1` or `--fps`.
     frame_stats: FrameStats,
+    /// One deferred repaint, so the frame-rate readout can settle to `idle` after the last
+    /// frame of a gesture. Re-armed from `render`, which drops the pending one, so only the
+    /// last frame of a burst ever fires. `None` without `--fps`: nothing else needs it.
+    fps_settle: Option<Task<()>>,
     /// Whether node bodies are being built at this zoom. Retained because the thresholds
     /// overlap: the tier inside the band is whatever the last frame settled on.
     detail: Detail,
@@ -152,10 +160,12 @@ impl CanvasView {
             jump: None,
             page_search: None,
             context_menu: None,
+            json_editor: None,
             placement: None,
             _focus_out: focus_out,
             organize: None,
-            frame_stats: FrameStats::new(),
+            frame_stats: FrameStats::new(crate::settings::Settings::fps(cx)),
+            fps_settle: None,
             detail: Detail::Full,
         }
     }
@@ -167,6 +177,35 @@ impl CanvasView {
 
     pub(crate) fn frame_stats_enabled(&self) -> bool {
         self.frame_stats.enabled()
+    }
+
+    /// The frame rate the HUD draws, or `None` when `--fps` was not given or the canvas is idle.
+    pub(super) fn fps_reading(&self) -> Option<Reading> {
+        self.frame_stats
+            .fps_enabled()
+            .then(|| self.frame_stats.reading(Instant::now()))
+            .flatten()
+    }
+
+    pub(super) fn fps_enabled(&self) -> bool {
+        self.frame_stats.fps_enabled()
+    }
+
+    /// Schedules the one repaint that lets the readout fall back to `idle`.
+    ///
+    /// A passive counter only updates on a frame that was going to happen anyway, so without
+    /// this the pill would sit frozen on the last number a gesture produced. Re-arming drops
+    /// the pending task, so a burst of frames still costs exactly one trailing repaint.
+    fn arm_fps_settle(&mut self, cx: &mut Context<Self>) {
+        if !self.frame_stats.fps_enabled() {
+            return;
+        }
+        self.fps_settle = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(frame_stats::IDLE_AFTER)
+                .await;
+            this.update(cx, |_, cx| cx.notify()).ok();
+        }));
     }
 
     pub(crate) fn camera(&self) -> Camera {
@@ -372,6 +411,42 @@ impl CanvasView {
         }
         menu.open_submenu = index;
         cx.notify();
+    }
+
+    pub(crate) fn open_json_editor(
+        &mut self,
+        editor: json_editor::JsonEditorState,
+        cx: &mut Context<Self>,
+    ) {
+        self.json_editor = Some(editor);
+        cx.notify();
+    }
+
+    /// Moves the panel to where its anchor cell now is.
+    ///
+    /// The cell reports on every frame it is drawn, so this notifies only on a real change —
+    /// a repaint per report would request the next frame that produces the next report.
+    pub(crate) fn move_json_editor(&mut self, anchor: Bounds<Pixels>, cx: &mut Context<Self>) {
+        let Some(editor) = self.json_editor.as_mut() else {
+            return;
+        };
+        if editor.anchor == anchor {
+            return;
+        }
+        editor.anchor = anchor;
+        cx.notify();
+    }
+
+    /// Closes the panel and clears the edit behind it, so the cell stops being an anchor.
+    pub(crate) fn close_json_editor(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(editor) = self.json_editor.take() else {
+            return false;
+        };
+        if let Some(table) = editor.table.upgrade() {
+            table.update(cx, crate::node::result::ResultTable::cancel_edit);
+        }
+        cx.notify();
+        true
     }
 
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) -> bool {
@@ -742,6 +817,12 @@ impl CanvasView {
         // A menu is the most transient surface on the canvas: escape dismisses it before it
         // reaches anything the user might actually lose.
         if self.close_context_menu(cx) {
+            return;
+        }
+        // The JSON editor holds focus while it is up, so escape dispatches out of it to here
+        // rather than to the result node — which is why the node's own escape rule cannot see
+        // it. Cancelling a draft loses more than a selection does, so it goes before them.
+        if self.close_json_editor(cx) {
             return;
         }
         self.interaction = Interaction::Idle;
@@ -1636,6 +1717,7 @@ impl Render for CanvasView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.tick_flight(window, cx);
         self.tick_layout(window, cx);
+        self.arm_fps_settle(cx);
 
         let started = self.frame_stats.enabled().then(Instant::now);
         let camera = self.camera;
@@ -1721,7 +1803,9 @@ impl Render for CanvasView {
             .children(page_search::render(self, cx))
             // Last of all: the menu is the most transient surface on the canvas, and a press
             // anywhere outside it has to reach its scrim before anything else.
-            .children(context_menu::render(self, cx));
+            .children(context_menu::render(self, cx))
+            // Above the menu: a cell's menu can raise this, and the menu closes as it does.
+            .children(json_editor::render(self, cx));
 
         if let Some(started) = started {
             self.frame_stats.record(Phase::Render, started.elapsed());

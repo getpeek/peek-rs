@@ -197,8 +197,11 @@ Two deliberate differences from the reference, both forced by `DataTable` virtua
 
 - **Rows are a uniform 34 world units.** The reference measures every row, because a JSON cell
   renders its whole pretty-printed tree inline; `ROW_HEIGHT` there is only the estimate.
-- **JSON cells show a one-line summary** (`{…} 3 keys`, `[…] 7 items`) and will open in a detail
-  panel rather than growing the row.
+- **JSON cells preview their contents on one line** (`{ id: 42, user: {…}, tags: […] }`) and open
+  whole elsewhere rather than growing the row. The preview is bounded — at most four entries and
+  about sixty characters, and a nested container renders as `{…}` rather than recursing — so it
+  costs the same on a four-megabyte value as on a four-key one, which is what makes it safe on
+  the render path.
 
 Column widths are the reference's: the longest of the header and the first 30 values at 7.2 px a
 character plus 28 padding, clamped to 80–360, with an explicit width from `columnWidths`
@@ -365,9 +368,45 @@ take the yellow and blue the stylesheet gives them. One faithful oddity: the lea
 is checked **before** outbound references, so a result keyed by `user_id` reads as a key even
 though it also points at one — surprising written down, right on screen.
 
-Double-clicking a cell opens its full value in a pane under the toolbar: JSON as a tree with the
-reference's 36-character middle truncation and `123ch` badge, long text wrapped and scrollable,
-NULL and an undecodable value each saying so.
+Double-clicking a cell opens its full value. A long string, and any JSON in a result that cannot
+be written to, opens in the pane under the toolbar; a JSON cell in a writable result opens in the
+editor popover instead, since there would otherwise be no way to change one.
+
+**The pane's JSON is a foldable, searchable tree.** `json/tree.rs` parses a value into a flat
+arena in document order, so a container's descendants are the contiguous run up to its closing
+brace and folding one is an index jump rather than a walk. The visible-line list is rebuilt whole
+on a fold or a search — one linear pass, on a keypress, never on the render path — and the lines
+themselves are **virtualised with `uniform_list`**, which is what stops a jsonb document with tens
+of thousands of nodes building an element for every one of them. Search is plain case-insensitive
+containment rather than `crate::fuzzy`: inside a single value you know what you are looking for,
+and a subsequence scorer lights up most lines of anything large. A hit force-expands its
+ancestors, and non-matches are dimmed rather than hidden, because a key means little without the
+structure around it. The reference's 36-character middle truncation and `123ch` badge survive, and
+NULL and an undecodable value each still say so.
+
+The tree is parsed **once per opened cell**, not once per frame as the flat line list was. The
+pane shows exactly one cell, so there is no cache to key and no eviction to get wrong: the parsed
+view sits beside the coordinates it was parsed for, and is dropped when the cell moves or the rows
+are replaced.
+
+**The JSON editor is a popover anchored to its cell**, and it is chrome — a `CanvasView`-owned
+overlay at rem 1, like the context menu — for the opposite reason the pane is content. A pane
+*explaining* a cell should grow with the camera; a field you *type into* should not, or editing at
+zoom 0.4 means four-pixel text. The cell reports its own bounds from prepaint every frame the
+panel is open, so the panel follows a pan, a zoom or a scroll of the rows. It opens
+pretty-printed, says whether the draft parses, formats on request, and commits through `edit.rs`
+unchanged — the same `UPDATE … WHERE <pk> = …` and the same re-run of the query behind the result.
+
+**Highlighting needed no new dependency.** `tree-sitter-json` is already in the build:
+gpui-component's base `tree-sitter` feature pulls it in and does not gate `LanguageName::Json`
+behind one of its own, so unlike `sql` there is no grammar to register — only the `property` role
+the Peek themes were missing for its object keys (`peek-theme/src/component_map.rs`).
+
+**No ⌘S, unlike `MonacoJsonCell`.** `commands/keymap.rs` resolves one action per keystroke
+regardless of context — the shape `settings.json`'s `keymap` has, and cannot change — and ⌘S is
+already `Query::Format`. Binding it here silently replaced that one, which the query tests caught.
+Escape cancels and the Save button commits; a footer promising a key that stole another command's
+would be worse than the button alone.
 
 **The pane is inside the node, not floating over it** — and the reasoning first recorded here
 was wrong in both directions, which the context-menu work turned up. A `deferred` draw raised
@@ -598,6 +637,23 @@ The workspace list is no longer snapshotted at startup. `Settings` is a gpui glo
 `WorkspaceView` observes it, so a connection added in the picker appears in the pill immediately —
 one added by the TypeScript app still needs a restart, since nothing watches the file.
 
+**The pages picker is the same shape** (`title_bar/pages/panel.rs`). In `ui.pages.show_as =
+"list"` the tab strip collapses to one pill, and `Page::OpenPicker` (bare `o`) or a click on the
+pill raises a panel under it: a search box, the pages that match, and a footer with New page and
+the Enter hint. The search is ours — the reference's `PagesMenu.tsx` has none, which is fine for a
+popover over four pages and not for a document that has grown past a screenful. Scoring is
+`crate::fuzzy` over the page name, so the ranking, the threshold and the per-character highlight
+are the same ones the palette and the connection picker use. The cursor opens on the page you are
+on, the arrows walk it, Enter takes it, Escape closes and hands focus back to the canvas; clearing
+the box returns the cursor to the current page rather than to the top.
+
+It is a sibling layer rather than a `Popover` for two reasons worth recording, since a popover is
+the obvious thing to reach for. gpui-component's `Popover` binds `space` and `enter` to `Confirm`
+on the key context it wraps its content in, so a search field inside one never sees a space — the
+panel closes instead. And the dismissing press has to be swallowed: without a full-window scrim it
+reaches the canvas underneath and starts a marquee that clears the selection, which only a
+`WorkspaceView` child can prevent.
+
 The window minimum is 760 × 480 rather than the old 640 × 400: the bottom chrome is two panels,
 one pinned left and one centred, and below about 750 px the centred one runs into the other.
 
@@ -624,7 +680,8 @@ bump the revision, so they never schedule a write.
 cargo run -- --workspace <name> --connection <name>   # defaults to the first workspace/connection in settings.json
 cargo run -- --write                                  # enables autosave; read-only otherwise
 cargo run -- --performance                            # level of detail on: distant nodes drop their bodies
-cargo test --workspace                                # 676 tests, a few seconds after the first build
+cargo run -- --fps                                    # frame-rate readout beside the zoom cluster
+cargo test --workspace                                # 1,104 tests, a few seconds after the first build
 cargo test -p peek-config -p peek-document -p peek-canvas   # the gpui-free crates, seconds
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
@@ -705,6 +762,21 @@ is absent from the harness, and disabling the snapping changes the headless numb
 The evidence for it is the cache keys themselves (`RenderGlyphParams` and
 `line_layout::CacheKey` both carry `font_size`, and `TextSystem::raster_bounds` is an unbounded
 map that is never cleared), and confirming it needs the real app under `PEEK_FRAME_STATS=1`.
+
+### A sixth, found while building the JSON viewer
+
+`render_td` did `self.rows.cell(row, col).cloned()` — a **deep clone of the whole
+`serde_json::Value`** for every visible JSON cell, every frame, and a fresh `String` for every
+text one. The fix is one line per site: take an `Arc::clone` of the `ResultSet` first, which is a
+refcount bump, and borrow the cell out of that local handle instead. It is worth **11–13 %** in
+the readable range, and it applies to text columns as much as JSON ones.
+
+The benchmark could not see any of this, because its fixture is all `Cell::Text`. It gained a
+JSON variant — 2,000 × 8 with three columns of a twelve-key object — and a third sweep,
+`zooming_over_json_results`. On that fixture: **5.9 ms a frame before the fix, 5.2 after**, and
+**5.5 with the richer inline preview on top** — so previewing a cell's contents instead of its
+shape costs about 2 %, inside the run-to-run spread, and still lands well under where it started.
+The text sweeps moved the same way: 10.0 → 8.8 ms in the readable range, 16.7 → 15.6 zooming out.
 
 Deliberately left alone: `paint_dot_grid` emits one quad per dot but `grid_step` keeps them
 ≥ 12 px apart, which caps it near 11k quads for a full-screen pane; and the ~26 `on_action`
@@ -791,9 +863,17 @@ listeners, the HUD and the toolbar are rebuilt every frame, which is cheap next 
   types `)` elsewhere would need gpui's `key_equivalents`, which Peek does not use yet.
 - Mouse-wheel (non-trackpad) viewport commits use a 140 ms quiet-period timer.
 - The title bar carries the page tabs and the connection picker; no collaborate button yet.
-- No FPS overlay (`gpui-fps` is not a published crate for this gpui-pre version). `PEEK_FRAME_STATS=1`
-  is the substitute: `canvas/frame_stats.rs` logs mean and p95 for render, prepaint and paint
-  every 60 frames, with the visible and total node counts. See "Canvas frame cost" below.
+- **`--fps` puts a frame-rate readout in the zoom cluster**, as a segment after the camera lock.
+  It is **passive**: it counts frames gpui actually drew over a rolling second and reads `idle`
+  when nothing is moving, because gpui redraws on demand and a still canvas draws nothing at all —
+  reporting that as 0 fps would read as a stall. It shows the rate and the **worst** interval in
+  the window rather than a mean, since one stall inside a smooth second is exactly what it exists
+  to catch, and tints the rate green / yellow / red so a regression is visible without reading it.
+  The one cost it adds to the frame loop is a settle timer, re-armed each frame, so the reading
+  can fall back to `idle` after the last frame of a gesture — one extra frame per gesture, and
+  nothing at all without the flag. `PEEK_FRAME_STATS=1` is independent and unchanged:
+  `canvas/frame_stats.rs` logs mean and p95 for render, prepaint and paint every 60 frames, with
+  the visible and total node counts. See "Canvas frame cost" below.
 - Fonts: the theme names "Monaspace Krypton" and relies on it being installed; bundling the OTFs
   via `cx.text_system().add_fonts` is deferred.
 - A user keymap entry naming a command id not yet in the registry (e.g. `Page::New`) is logged and

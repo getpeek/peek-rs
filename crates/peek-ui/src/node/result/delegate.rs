@@ -8,13 +8,14 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::table::{Column as TableColumn, TableDelegate, TableState};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    App, Context, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Window, div,
-    px,
+    App, Context, Div, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Stateful,
+    Window, div, px,
 };
 use gpui_kit::{Entity, Focusable, WeakEntity};
 use peek_document::ResultSet;
@@ -119,6 +120,9 @@ pub(super) struct Editing {
     pub(super) error: Option<String>,
     /// True while the statement is in flight; the editor is read-only meanwhile.
     pub(super) saving: bool,
+    /// Whether the JSON popover holds the draft rather than the in-cell field. Two editors
+    /// exist and never at once, and the commit path has to read the right one.
+    pub(super) popover: bool,
 }
 
 impl std::fmt::Debug for ResultDelegate {
@@ -177,8 +181,12 @@ impl ResultDelegate {
         &self.input
     }
 
-    /// What a double-click does to a cell: a short value edits in place, a JSON object or a long
-    /// string opens in the pane, which is the only place either of them fits.
+    /// What a double-click does to a cell.
+    ///
+    /// A short value edits in place. A JSON value opens the popover editor, which is the only
+    /// surface either readable or writable enough for a document — and falls back to the value
+    /// pane when the result cannot be written to, since there would be nothing to save. A long
+    /// string opens in the pane, which is the only place it fits whole.
     fn open_cell(
         &mut self,
         row: usize,
@@ -186,17 +194,28 @@ impl ResultDelegate {
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
-        let big = self.rows.cell(row, column).is_some_and(|cell| {
-            matches!(cell, peek_document::Cell::Json(_))
-                || cell.to_display_string().chars().count() > super::detail::INLINE_LIMIT
-        });
-        if big {
-            self.detail = Some((row, column));
+        let Some(cell) = self.rows.cell(row, column) else {
             return;
-        }
+        };
+        let json = matches!(cell, peek_document::Cell::Json(_));
+        let long = cell.to_display_string().chars().count() > super::detail::INLINE_LIMIT;
         let Some(owner) = self.owner() else {
             return;
         };
+        if json {
+            // Reading the owner back mid-update is the re-entrant borrow documented below, so
+            // even the writability question waits for the next turn.
+            window.defer(cx, move |window, cx| {
+                owner.update(cx, |owner, cx| {
+                    owner.open_json_cell(row, column, window, cx);
+                });
+            });
+            return;
+        }
+        if long {
+            self.detail = Some((row, column));
+            return;
+        }
         // `cx` is mid-update on this table, and opening an editor reads it back — for the
         // editable-table check, the draft, and the input. Doing that here is a re-entrant borrow
         // and aborts the process, which is not a panic a user can recover from. Hand it to the
@@ -212,12 +231,43 @@ impl ResultDelegate {
         let editing = self
             .editing
             .as_ref()
-            .filter(|edit| edit.row == row && edit.column == column)?;
+            // The popover holds the draft for a JSON cell, so the cell itself keeps rendering
+            // its preview underneath rather than swapping in a field nothing types into.
+            .filter(|edit| edit.row == row && edit.column == column && !edit.popover)?;
         Some(Input::new(&self.input).xsmall().disabled(editing.saving))
+    }
+
+    /// Makes the cell report where it ended up, when the JSON popover is anchored to it.
+    ///
+    /// The panel is chrome the canvas draws, so it has to be told — every frame, which is how it
+    /// follows a pan, a zoom or a scroll of the rows.
+    fn anchor_json_editor(&self, cell: Stateful<Div>, at: (usize, usize)) -> Stateful<Div> {
+        let (row, column) = at;
+        let anchored = self
+            .editing
+            .as_ref()
+            .is_some_and(|edit| edit.popover && edit.row == row && edit.column == column);
+        let Some(owner) = self.owner().filter(|_| anchored) else {
+            return cell;
+        };
+        cell.on_prepaint(move |bounds, _, cx| {
+            owner.update(cx, |table, cx| table.report_json_anchor(bounds, cx));
+        })
+    }
+
+    pub(super) fn begin_json_edit(&mut self, row: usize, column: usize) {
+        self.editing = Some(Editing {
+            popover: true,
+            row,
+            column,
+            error: None,
+            saving: false,
+        });
     }
 
     pub(super) fn begin_edit(&mut self, row: usize, column: usize) {
         self.editing = Some(Editing {
+            popover: false,
             row,
             column,
             error: None,
@@ -673,7 +723,11 @@ impl TableDelegate for ResultDelegate {
         let Some(row) = self.row_of(row_ix) else {
             return div().into_any_element();
         };
-        let Some(value) = self.rows.cell(row, col_ix).cloned() else {
+        // A refcount bump, not a copy of the rows: cloning the `Cell` here deep-cloned the whole
+        // `serde_json::Value` of every visible JSON cell, every frame. Borrowing through a local
+        // handle keeps the value out of `self`'s borrow for the rest of the method.
+        let rows = Arc::clone(&self.rows);
+        let Some(value) = rows.cell(row, col_ix) else {
             return div().into_any_element();
         };
         let matched = self.matches.cell(row, col_ix).is_some();
@@ -712,6 +766,8 @@ impl TableDelegate for ResultDelegate {
         }
 
         let outlines = self.outlines(row_ix, col_ix, cx);
+
+        cell = self.anchor_json_editor(cell, (row, col_ix));
 
         cell.on_mouse_down(
             MouseButton::Left,
@@ -771,9 +827,9 @@ impl TableDelegate for ResultDelegate {
         )
         .children(outlines)
         .child(if links {
-            self.link_cell((row_ix, col_ix), (row, &value), cx)
+            self.link_cell((row_ix, col_ix), (row, value), cx)
         } else {
-            cells::cell(&value, self.role(col_ix), cx)
+            cells::cell(value, self.role(col_ix), cx)
         })
         .into_any_element()
     }
@@ -886,7 +942,9 @@ impl ResultDelegate {
         let Some(row) = self.row_of(col_ix - 1) else {
             return div().into_any_element();
         };
-        let Some(value) = self.rows.cell(row, row_ix).cloned() else {
+        // As in `render_td`: a handle, so a JSON value is not deep-cloned once a frame.
+        let rows = Arc::clone(&self.rows);
+        let Some(value) = rows.cell(row, row_ix) else {
             return div().into_any_element();
         };
         let matched = self.matches.cell(row, row_ix).is_some();
@@ -909,7 +967,7 @@ impl ResultDelegate {
                     }
                 }),
             )
-            .child(super::cells::cell(&value, role, cx))
+            .child(super::cells::cell(value, role, cx))
             .into_any_element()
     }
 

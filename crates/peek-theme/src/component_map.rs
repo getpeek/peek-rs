@@ -108,6 +108,10 @@ fn syntax_entries(spec: &ThemeSpec) -> Vec<(&'static str, Color)> {
         ("type", syntax.type_name),
         ("variable", syntax.variable),
         ("attribute", syntax.variable),
+        // JSON's object keys, which the bundled grammar captures as `@property`. Without a row
+        // here they fall through to plain text and a document reads as one undifferentiated
+        // colour; the tree in the value pane tints its keys the same way.
+        ("property", syntax.variable),
         ("comment", syntax.comment),
         ("operator", syntax.operator),
         ("punctuation", syntax.operator),

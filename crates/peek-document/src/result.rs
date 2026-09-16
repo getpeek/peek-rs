@@ -92,28 +92,6 @@ impl Cell {
         }
     }
 
-    /// A JSON value's shape in one line: `{…} 3 keys`, `[…] 7 items`, `{}`, `[]`.
-    ///
-    /// The reference renders a JSON cell's whole pretty-printed tree inside the cell and lets
-    /// the row grow to fit it. A virtualised table needs every row to be the same height, so
-    /// the grid shows this and the full value opens in a detail panel.
-    ///
-    /// `None` for anything that is not a JSON object or array — a scalar in a JSON column is
-    /// shown as itself.
-    #[must_use]
-    pub fn json_summary(&self) -> Option<String> {
-        let Self::Json(value) = self else {
-            return None;
-        };
-        match value {
-            Value::Object(map) if map.is_empty() => Some("{}".to_string()),
-            Value::Object(map) => Some(format!("{{…}} {}", plural(map.len(), "key", "keys"))),
-            Value::Array(items) if items.is_empty() => Some("[]".to_string()),
-            Value::Array(items) => Some(format!("[…] {}", plural(items.len(), "item", "items"))),
-            _ => None,
-        }
-    }
-
     /// The cell as the UI shows and copies it: `stringifyValue` from
     /// `~/labs/peek/src/canvas/nodes/Result/stringify.ts`, where null is the empty string so a
     /// TSV copy leaves the field blank rather than writing the word "null".
@@ -273,14 +251,6 @@ impl ResultSet {
     }
 }
 
-fn plural(count: usize, one: &str, many: &str) -> String {
-    if count == 1 {
-        format!("{count} {one}")
-    } else {
-        format!("{count} {many}")
-    }
-}
-
 fn sidecar_column(cell: &Value) -> Option<Column> {
     let triple = cell.as_array()?;
     let name = triple.first()?.as_str()?;
@@ -380,35 +350,6 @@ mod tests {
             vec![vec![Cell::Int(1)]],
         );
         assert_eq!(set.cell(0, 1), Some(&Cell::Null));
-    }
-
-    #[test]
-    fn json_summaries_describe_shape_and_size() {
-        assert_eq!(
-            Cell::Json(json!({"a": 1, "b": 2}))
-                .json_summary()
-                .as_deref(),
-            Some("{…} 2 keys")
-        );
-        assert_eq!(
-            Cell::Json(json!({"a": 1})).json_summary().as_deref(),
-            Some("{…} 1 key"),
-            "one key is not pluralised"
-        );
-        assert_eq!(Cell::Json(json!({})).json_summary().as_deref(), Some("{}"));
-        assert_eq!(
-            Cell::Json(json!([1, 2, 3])).json_summary().as_deref(),
-            Some("[…] 3 items")
-        );
-        assert_eq!(Cell::Json(json!([])).json_summary().as_deref(), Some("[]"));
-    }
-
-    /// A scalar in a JSON column is shown as itself, not summarised.
-    #[test]
-    fn a_json_scalar_has_no_summary() {
-        assert_eq!(Cell::Json(json!(42)).json_summary(), None);
-        assert_eq!(Cell::Json(json!("text")).json_summary(), None);
-        assert_eq!(Cell::Text("x".into()).json_summary(), None);
     }
 
     #[test]

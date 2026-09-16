@@ -15,12 +15,13 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{Disableable, Icon, Selectable, Sizable, Size, StyledExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    Action, App, ClickEvent, Context, Div, FocusHandle, FontWeight, Pixels, SharedString, Window,
-    div, px, transparent_black,
+    Action, App, ClickEvent, Context, Div, FocusHandle, FontWeight, Hsla, Pixels, SharedString,
+    Window, div, px, transparent_black,
 };
-use peek_theme::ActivePeekTheme;
+use peek_theme::{ActivePeekTheme, PeekTheme};
 
 use super::CanvasView;
+use super::frame_stats::Reading;
 use crate::commands::{self, actions};
 
 /// `.zoom-indicator button`, and the 14 px glyphs inside them.
@@ -28,6 +29,12 @@ const BUTTON: Pixels = px(26.0);
 const GLYPH: Pixels = px(14.0);
 /// `.lvl`: wide enough that the percentage does not shuffle the buttons as it changes.
 const READOUT: Pixels = px(44.0);
+/// The frame-rate segment, sized so `120 fps 42 ms` and `idle` occupy the same room — a readout
+/// that resizes as the number moves is a readout that moves everything left of it.
+const FPS_READOUT: Pixels = px(90.0);
+/// Above this the canvas is keeping up; below [`FPS_SLOW`] it is visibly dropping frames.
+const FPS_SMOOTH: f64 = 55.0;
+const FPS_SLOW: f64 = 30.0;
 
 pub(super) fn render(view: &CanvasView, cx: &mut Context<CanvasView>) -> impl IntoElement {
     #[allow(
@@ -71,6 +78,64 @@ pub(super) fn render(view: &CanvasView, cx: &mut Context<CanvasView>) -> impl In
             locked,
         ))
         .child(camera_lock(locked, &focus))
+        // Last, so it reads as an annotation on the cluster rather than another control in it.
+        .children(view.fps_enabled().then(|| fps(view.fps_reading(), cx)))
+}
+
+/// `58 fps  17 ms`, or `idle` when nothing is drawing.
+///
+/// gpui redraws on demand, so a still canvas produces no frames at all and there is no rate to
+/// report — saying `idle` is the honest reading, and it is why this is not simply zero.
+/// `worst_ms` rather than a mean: one stall inside a smooth second is exactly what this is for,
+/// and a mean is what hides it.
+fn fps(reading: Option<Reading>, cx: &App) -> impl IntoElement {
+    let theme = cx.peek_theme();
+    let row = div()
+        .id("fps-readout")
+        .test_support()
+        .h_flex()
+        .items_center()
+        .justify_center()
+        .gap(px(4.0))
+        .h(BUTTON)
+        .w(FPS_READOUT)
+        .border_l_1()
+        .border_color(theme.node_border.opacity(0.5))
+        .text_xs();
+
+    let Some(reading) = reading else {
+        return row
+            .aria_label("idle")
+            .text_color(theme.fg_muted)
+            .child("idle");
+    };
+
+    let label = format!("{:.0} fps", reading.fps);
+    let worst = format!("{:.0} ms", reading.worst_ms);
+    row.aria_label(SharedString::from(format!("{label} {worst}")))
+        .child(
+            div()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rate_color(reading.fps, theme))
+                .child(label),
+        )
+        .child(
+            div()
+                .text_size(px(9.5))
+                .text_color(theme.fg_subtle)
+                .child(worst),
+        )
+}
+
+/// The band the rate falls in, so a regression is noticeable without reading the number.
+fn rate_color(fps: f64, theme: &PeekTheme) -> Hsla {
+    if fps >= FPS_SMOOTH {
+        theme.green
+    } else if fps >= FPS_SLOW {
+        theme.yellow
+    } else {
+        theme.red
+    }
 }
 
 /// `.zoom-indicator`: a transparent pill behind a half-alpha hairline, with a 1 px gap and 3 px of

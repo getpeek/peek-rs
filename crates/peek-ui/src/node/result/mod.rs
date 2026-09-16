@@ -27,6 +27,7 @@ mod edit;
 mod editable;
 mod follow;
 mod json;
+mod json_edit;
 pub(crate) mod menu;
 mod outline;
 pub(crate) mod pivot;
@@ -38,7 +39,7 @@ mod widths;
 use std::sync::Arc;
 
 use gpui_kit::TestSupportExt;
-use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::input::{EditorState, InputEvent, InputState};
 use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::{Sizable, Size, StyledExt};
 use gpui_kit::prelude::*;
@@ -146,6 +147,15 @@ pub(crate) struct ResultTable {
     zoom: f64,
     pub(super) search_open: bool,
     pub(super) search_input: Entity<InputState>,
+    /// The cell the value pane is showing, and the tree parsed from it. Derived state beside
+    /// the delegate's `detail`, which stays the source of truth for *which* cell is open.
+    detail: Option<detail::Detail>,
+    /// The pane's find field. One per table, reused for whichever cell is open — the same
+    /// reason the in-cell editor has one field rather than one per cell.
+    pub(super) detail_search: Entity<InputState>,
+    /// The JSON popover's editor. One per table, reused for whichever cell is open — the same
+    /// reason the in-cell field is one entity rather than one per cell.
+    json_editor: Entity<EditorState>,
     pub(super) search_query: String,
     /// Which of Export or Copy is asking for a format, if either is.
     pub(super) format_menu: Option<toolbar::Destination>,
@@ -154,7 +164,7 @@ pub(crate) struct ResultTable {
     /// Element ids derived from the node id. Built once: they never change, and `format!`ing
     /// five of them per frame per visible result is allocation for a constant.
     pub(super) ids: ElementIds,
-    _subscriptions: [gpui_kit::Subscription; 3],
+    _subscriptions: [gpui_kit::Subscription; 4],
 }
 
 /// The node-scoped element ids a result node needs, minted once in [`ResultTable::new`].
@@ -172,6 +182,8 @@ pub(super) struct ElementIds {
     pub(super) search_close: SharedString,
     pub(super) format_close: SharedString,
     pub(super) detail_close: SharedString,
+    pub(super) detail_collapse: SharedString,
+    pub(super) detail_expand: SharedString,
 }
 
 impl ElementIds {
@@ -189,6 +201,8 @@ impl ElementIds {
             search_close: SharedString::from(format!("{node}-search-close")),
             format_close: SharedString::from(format!("{node}-format-close")),
             detail_close: SharedString::from(format!("{node}-detail-close")),
+            detail_collapse: SharedString::from(format!("{node}-detail-collapse")),
+            detail_expand: SharedString::from(format!("{node}-detail-expand")),
         }
     }
 }
@@ -229,6 +243,11 @@ impl ResultTable {
         // Roles are classified against the *columns*, which only a new result can change. A
         // zoom moves the pixel widths and nothing else, so it must not drag a schema walk and
         // a notify along behind it.
+        if adopted.rows_changed {
+            // The pane's tree was parsed from a cell of the previous result, and its
+            // coordinates mean nothing against a new one.
+            self.forget_detail();
+        }
         if adopted.rows_changed || self.roles_stale {
             self.refresh_roles(cx);
             cx.notify();
@@ -468,7 +487,7 @@ impl ResultTable {
             return;
         }
         if self.table.read(cx).delegate().editing().is_some() {
-            self.cancel_edit(cx);
+            self.dismiss_edit(cx);
             return;
         }
         if self.table.read(cx).delegate().detail().is_some() {
@@ -584,6 +603,8 @@ impl ResultState {
         let node = id.clone();
         let document = document.clone();
         let search_input = toolbar::search_input(window, cx);
+        let detail_search = detail::search_input(window, cx);
+        let json_editor = json_edit::editor(window, cx);
         let query = data.query.clone();
         let facts = QueryFacts::of(&query);
         let ids = ElementIds::new(id);
@@ -617,6 +638,15 @@ impl ResultState {
                         }
                     },
                 ),
+                cx.subscribe(
+                    &detail_search,
+                    |this: &mut ResultTable, input, event: &InputEvent, cx| {
+                        if matches!(event, InputEvent::Change) {
+                            let text = input.read(cx).value().to_string();
+                            this.on_detail_search_changed(&text, cx);
+                        }
+                    },
+                ),
             ],
             tables: facts.tables,
             editable: facts.editable,
@@ -631,6 +661,9 @@ impl ResultState {
             search_open: false,
             format_menu: None,
             search_input,
+            detail: None,
+            detail_search,
+            json_editor,
             search_query: String::new(),
             search_task: Task::ready(()),
         });
@@ -695,7 +728,7 @@ pub(crate) fn body(
 }
 
 impl Render for ResultTable {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let table = self.table.clone();
         let empty = table.read(cx).delegate().result_rows().is_empty();
 
@@ -754,7 +787,7 @@ impl Render for ResultTable {
             )
             .child(self.toolbar(cx))
             .children(self.edit_error(cx))
-            .children(self.detail_pane(cx))
+            .children(self.detail_pane(window, cx))
             .child(if empty {
                 empty_state("No results", cx)
             } else {
@@ -1659,8 +1692,12 @@ mod render_tests {
         assert_eq!(offered, None);
     }
 
-    /// A JSON cell shows a one-line summary in the grid; double-clicking opens its full tree in
-    /// the detail pane, which is the only way to read it.
+    /// A JSON cell previews its contents in the grid; double-clicking opens the whole value.
+    ///
+    /// Into the *pane* here, because a headless test has no connection and so no writable table
+    /// — which is the fallback `open_json_cell` takes when there would be nothing to save. The
+    /// popover half is driven by `raising_the_json_editor_draws_it_and_escape_takes_it_down`,
+    /// which does not need a database to raise the panel.
     #[gpui_kit::test]
     fn double_clicking_a_json_cell_opens_its_value(cx: &mut TestAppContext) {
         let (handle, workspace) = open(cx, 4);
@@ -1692,6 +1729,43 @@ mod render_tests {
                 .and_then(|table| table.read(cx).delegate().detail())
         });
         assert_eq!(open, Some((0, 1)), "the JSON cell opened");
+    }
+
+    /// The panel is canvas chrome, so raising it and taking it down are the canvas' business —
+    /// and both are reachable without a database, unlike the commit behind them.
+    #[gpui_kit::test]
+    fn raising_the_json_editor_draws_it_and_escape_takes_it_down(cx: &mut TestAppContext) {
+        let (handle, workspace) = open(cx, 2);
+        let table = cx
+            .update(|cx| workspace.read(cx).result_inner(&result_node(), cx))
+            .expect("the result node has a table");
+        let canvas = cx.update(|cx| workspace.read(cx).canvas_for_test().clone());
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            canvas.update(cx, |canvas, cx| {
+                canvas.open_json_editor(
+                    crate::canvas::json_editor::JsonEditorState {
+                        table: table.downgrade(),
+                        column: SharedString::from("meta"),
+                        anchor: gpui_kit::Bounds {
+                            origin: point(px(200.0), px(200.0)),
+                            size: size(px(180.0), px(34.0)),
+                        },
+                    },
+                    cx,
+                );
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("json-editor").is_some(), "the panel is up");
+
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("json-editor").is_none(),
+                "escape takes it down"
+            );
+        })
+        .unwrap();
     }
 
     /// `cmd-f` opens the find bar while the table has focus.

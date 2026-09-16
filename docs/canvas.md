@@ -451,7 +451,40 @@ occludes what is behind it rather than frosting it.
 `View::ToggleUi` hides every chrome surface, not just the bar: `CanvasView::chrome_visible`
 gates the HUD and the toolbar, and feeds `Scope::chrome_hidden`.
 
+### Chrome or content: where a surface raised by a node belongs
+
+Three of them are raised by nodes and drawn by the canvas — the right-click menu
+(`canvas/context_menu.rs`), the jump scrim (`canvas/jump.rs`) and the JSON editor
+(`canvas/json_editor.rs`) — while the Result node's value pane and the Variable node's list
+editor stay inside the node. The dividing line is **not** technical. A `deferred` draw raised
+from inside a node body inherits `BASE_REM * zoom` and is *not* clipped by the body's
+`overflow_hidden`, so either is buildable either way; `node/result/detail.rs` records how that
+was got wrong in both directions before anyone checked.
+
+The question is what the surface *is*:
+
+- A surface **explaining** a cell is content. It belongs to its node, should grow with the
+  camera, and reads better pushing the table down than floating over it.
+- A surface you **act through** is chrome. A menu that doubles in size when you zoom in is
+  chrome behaving like content; a field you type into at zoom 0.4 renders four-pixel text, and
+  the document you are editing is the one thing on screen that has to stay legible.
+
+So the value pane and the JSON editor sit on opposite sides of the line for the same cell, and
+both are right. The editor pays for it by having to be told where its cell is: the cell reports
+its own bounds from `on_prepaint` every frame the panel is open, and the canvas moves the panel
+only when they actually change — a repaint per report would request the next frame that produced
+the next report.
+
 ## HUD
 
-Bottom-left cluster: `−`, zoom %, `+`, `Fit`, `Lock`. Every button dispatches the same action
-the keyboard shortcut does through the canvas focus handle.
+Bottom-left cluster: `−`, zoom %, `+`, `Fit`, `Lock`, and — behind `--fps` — a frame-rate
+readout. Every button dispatches the same action the keyboard shortcut does through the canvas
+focus handle.
+
+The readout is a segment inside the same pill rather than a pill of its own, because an
+absolutely positioned sibling cannot know where the first one ends. It is **passive**: it reads
+the frames `FrameStats::tick` already counts, and never asks for one of its own — a counter that
+drives frames measures itself. gpui redraws on demand, so a still canvas produces no frames and
+the honest reading is `idle`, not zero. The single concession to the frame loop is a settle
+timer, re-armed each frame and dropped by the next, so the last frame of a gesture leaves exactly
+one trailing repaint behind to show `idle`.
