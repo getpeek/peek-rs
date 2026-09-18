@@ -11,6 +11,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gpui_kit::TestSupportExt;
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, RopeExt};
 use gpui_kit::component::{Disableable, Selectable, Sizable, StyledExt};
@@ -139,11 +140,17 @@ pub(crate) fn header_extras(
     let document = context.document.clone();
     let node = id.clone();
 
-    let dot =
-        div()
-            .size(rems(0.375))
-            .rounded_full()
-            .bg(if live { theme.green } else { theme.fg_subtle });
+    // `.live-dot`: muted with a ring while idle, accent-filled while polling.
+    let dot = div()
+        .size(rems(0.5))
+        .rounded_full()
+        .border_1()
+        .border_color(if live {
+            theme.accent
+        } else {
+            theme.node_border_strong
+        })
+        .bg(if live { theme.accent } else { theme.fg_muted });
 
     Button::new(SharedString::from(format!("{id}-live")))
         .ghost()
@@ -551,18 +558,19 @@ impl QueryEditor {
         let theme = cx.peek_theme();
         div()
             .h_flex()
-            .justify_end()
-            .gap(rems(0.25))
+            .items_center()
+            .justify_between()
+            .gap(rems(0.5))
             .flex_none()
-            .h(rems(1.75))
-            .px(rems(0.375))
+            .px(rems(0.75))
+            .py(rems(0.5))
             .mb(rems(RESIZE_FOOTER_CLEARANCE / BASE_REM))
             .border_t_1()
             .border_color(theme.node_border)
             .child(
-                Button::new(SharedString::from(format!("{}-format", self.node)))
+                footer_button(SharedString::from(format!("{}-format", self.node)))
                     .ghost()
-                    .xsmall()
+                    .icon(IconName::ListIndentIncrease)
                     .label("Format")
                     .tooltip("Format query")
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -584,18 +592,23 @@ impl QueryEditor {
             .is_some_and(|data| data.is_running == Some(true));
 
         if self.confirming_unbounded {
-            return Button::new(id)
+            return footer_button(id)
                 .danger()
-                .xsmall()
+                .icon(IconName::TriangleAlert)
                 .label("Run unbounded")
                 .disabled(running)
                 .tooltip("Do you want to run this unbounded delete operation?")
                 .on_click(cx.listener(|this, _, _, cx| this.start_run(cx)));
         }
 
-        Button::new(id)
-            .primary()
-            .xsmall()
+        // `.btn`'s default variant, not the accent fill: the reference keeps Run a quiet
+        // bordered button and spends the accent on the live-poll dot and the selection ring.
+        footer_button(id)
+            .icon(if running {
+                IconName::LoaderCircle
+            } else {
+                IconName::Play
+            })
             .label(if running { "Running…" } else { "Run" })
             .disabled(!connected || running)
             .tooltip(if connected {
@@ -603,8 +616,34 @@ impl QueryEditor {
             } else {
                 "Running a query needs a database connection"
             })
+            .child(keycap("\u{2318}\u{21a9}", cx))
             .on_click(cx.listener(|this, _, _, cx| this.start_run(cx)))
     }
+}
+
+/// `.btn`: `padding: 6px 12px`, `border-radius: 6px`, `font: 500 12px`, `gap: 6px`. The size
+/// preset comes closest at `Small` and the rest is refined on top of it.
+fn footer_button(id: SharedString) -> Button {
+    Button::new(id)
+        .small()
+        .h(rems(1.75))
+        .px(rems(0.75))
+        .gap(rems(0.375))
+        .text_size(rems(0.75))
+}
+
+/// `.btn .kbd`: the shortcut, spelled out on the button that answers to it.
+fn keycap(keys: &'static str, cx: &App) -> impl IntoElement {
+    let theme = cx.peek_theme();
+    div()
+        .flex_none()
+        .px(rems(0.3125))
+        .rounded(rems(0.1875))
+        .border_1()
+        .border_color(theme.node_border)
+        .text_size(rems(0.625))
+        .text_color(theme.fg_subtle)
+        .child(keys)
 }
 
 impl Render for QueryEditor {

@@ -165,7 +165,7 @@ pub(super) fn chip(message: &AgentMessage, context_updated: bool, cx: &App) -> A
             div()
                 .size(rems(1.5))
                 .flex_shrink_0()
-                .rounded(scaled(theme.radius_card))
+                .rounded(rems(0.4375))
                 .bg(background)
                 .flex()
                 .items_center()

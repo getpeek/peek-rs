@@ -71,9 +71,9 @@ impl ResultTable {
             .items_center()
             .justify_between()
             .flex_none()
-            .h(rems(1.75))
-            .px(rems(0.5))
-            .gap(rems(0.5))
+            .px(rems(0.75))
+            .py(rems(0.5))
+            .gap(rems(0.75))
             .border_b_1()
             .border_color(theme.node_border);
 
@@ -103,9 +103,9 @@ impl ResultTable {
         div()
             .h_flex()
             .items_center()
-            .gap(rems(0.375))
+            .gap(rems(0.75))
             .min_w_0()
-            .text_size(rems(0.6875))
+            .text_size(rems(0.71875))
             .text_color(theme.fg_muted)
             .child(
                 div()

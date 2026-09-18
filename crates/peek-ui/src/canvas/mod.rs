@@ -21,9 +21,9 @@ use std::time::{Duration, Instant};
 use gpui_kit::TestSupportExt;
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    App, Bounds, Context, CursorStyle, Entity, FocusHandle, KeyDownEvent, KeyUpEvent, Modifiers,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels, ScrollDelta,
-    ScrollWheelEvent, SharedString, Subscription, Task, TouchPhase, Window, div,
+    App, Bounds, Context, CursorStyle, Entity, FocusHandle, Hsla, KeyDownEvent, KeyUpEvent,
+    Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels,
+    ScrollDelta, ScrollWheelEvent, SharedString, Subscription, Task, TouchPhase, Window, div,
 };
 use peek_canvas::camera::FitOptions;
 use peek_canvas::direction::{self, Direction};
@@ -1506,7 +1506,7 @@ impl CanvasView {
         visible: Rect,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> (Vec<NodeItem>, Vec<Rect>) {
+    ) -> (Vec<NodeItem>, Vec<(Rect, Hsla)>) {
         // Cloned so the per-kind bodies below can take `&mut App`: `Entity::read` borrows it.
         // Only what the camera can see is cloned: an agent node carries its whole message
         // history, tool arguments and all, and a page of them is megabytes a frame otherwise.
@@ -1536,13 +1536,14 @@ impl CanvasView {
         self.detail = self.resolved_detail(window, cx);
         self.reclaim_focus(window, cx);
 
+        let ring = cx.peek_theme().clone();
         let mut items = Vec::new();
         let mut selected_rects = Vec::new();
         for node in &nodes {
             let world = node.bounds();
             let selected = selection.contains(&node.id);
             if selected {
-                selected_rects.push(world);
+                selected_rects.push((world, ring.selection_ring(node.node_type())));
             }
             items.push(NodeItem {
                 world,
@@ -1737,7 +1738,6 @@ impl Render for CanvasView {
             background: theme.canvas_base,
             gradient: theme.canvas_gradient,
             grid_dot: theme.bg_grid,
-            ring: theme.selection,
             marquee_fill: theme.accent_bg,
             marquee_border: theme.selection,
             node_radius: f32::from(theme.radius_node),

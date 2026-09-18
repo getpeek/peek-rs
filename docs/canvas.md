@@ -138,7 +138,7 @@ the grab keeps its width under the pointer instead of thinning out as the camera
 - Two caps keep the band honest: it may grow to at most `MAX_ZOOM_OUT_GROWTH` (2×) its screen inset
   in world units as the camera zooms out, and it is never more than a third of either axis. Without
   the first, a card at zoom 0.1 would be resize band edge to edge with nothing left to drag.
-- the top `HEADER_WORLD_HEIGHT` (32, the shell's `rems(2.0)` at base rem 16) is the drag handle.
+- the top `HEADER_WORLD_HEIGHT` (36, `.app-node-header`'s `min-height` at base rem 16) is the drag handle.
 - everything else is the body, which selects on click and drags only while the secondary modifier
   (cmd) is held at the press: cmd turns the whole card into a drag handle, moving the selection if
   the pressed node is part of it and selecting it first if not. An edge press never drags, modifier

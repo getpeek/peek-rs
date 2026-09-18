@@ -44,13 +44,14 @@ pub(crate) struct NodeItem {
 pub(crate) struct Overlay {
     /// Painted behind every node, so a curve runs under the cards it connects.
     pub edges: Vec<EdgeItem>,
-    pub selected_rects: Vec<Rect>,
+    /// Each selected node's rect with the colour its outline is drawn in, which `node.css`
+    /// takes from the node's own kind (`--pk-node-type-color`).
+    pub selected_rects: Vec<(Rect, Hsla)>,
     pub marquee: Option<Rect>,
     pub stroke: Option<LiveStroke>,
     pub background: Hsla,
     pub gradient: Option<(Hsla, Hsla)>,
     pub grid_dot: Hsla,
-    pub ring: Hsla,
     pub marquee_fill: Hsla,
     pub marquee_border: Hsla,
     /// Node corner radius in world pixels (zoom 1).
@@ -226,7 +227,7 @@ impl Element for CanvasElement {
                 window.with_rem_size(Some(rem), |window| element.paint(window, cx));
             }
 
-            for world in &self.overlay.selected_rects {
+            for (world, color) in &self.overlay.selected_rects {
                 let screen = offset(screen_rect(camera, *world), bounds.origin);
                 let ring = screen.dilate(px(RING_OFFSET));
                 window.paint_quad(quad(
@@ -234,7 +235,7 @@ impl Element for CanvasElement {
                     px(radius + RING_OFFSET),
                     transparent_black(),
                     px(RING_WIDTH),
-                    self.overlay.ring,
+                    *color,
                     BorderStyle::Solid,
                 ));
             }

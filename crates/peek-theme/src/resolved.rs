@@ -220,6 +220,14 @@ impl PeekTheme {
         self.node_type_accent(kind).unwrap_or(self.fg_muted)
     }
 
+    /// The selection outline's colour: `node.css` writes the kind accent into
+    /// `--pk-node-type-color` and the untinted kinds fall through to `--pk-accent`, which here
+    /// is whatever the theme made its selection colour (Terminal's phosphor green).
+    #[must_use]
+    pub fn selection_ring(&self, kind: Option<NodeType>) -> Hsla {
+        self.node_type_accent(kind).unwrap_or(self.selection)
+    }
+
     /// An edge's stroke, tinted by its **target** kind — "what this feeds", so the kind an edge
     /// points at is readable at a glance (`FloatingEdge.tsx`). Alpha is already applied.
     ///

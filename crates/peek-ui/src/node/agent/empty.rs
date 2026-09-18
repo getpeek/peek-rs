@@ -12,13 +12,15 @@ pub(super) fn waiting(cx: &App) -> AnyElement {
     centred()
         .child(
             div()
-                .text_size(rems(0.8))
-                .text_color(theme.fg_muted)
+                .text_size(rems(0.875))
+                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                .text_color(theme.fg)
                 .child("Ask questions about your dataset"),
         )
         .child(
             div()
-                .text_size(rems(0.7))
+                .text_size(rems(0.75))
+                .italic()
                 .text_color(theme.fg_subtle)
                 .child("Get insights and analysis from your data"),
         )
@@ -37,7 +39,8 @@ pub(super) fn unconfigured(cx: &App) -> AnyElement {
         )
         .child(
             div()
-                .text_size(rems(0.8))
+                .text_size(rems(0.8125))
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .text_color(theme.fg)
                 .child("No AI backend configured"),
         )
@@ -45,8 +48,8 @@ pub(super) fn unconfigured(cx: &App) -> AnyElement {
             div()
                 .max_w(rems(17.5))
                 .text_center()
-                .text_size(rems(0.7))
-                .text_color(theme.fg_subtle)
+                .text_size(rems(0.75))
+                .text_color(theme.fg_muted)
                 .child("Add an `ai.ollama` or `ai.acp` block to ~/peek/settings.json to use the agent."),
         )
         .into_any_element()
@@ -59,5 +62,5 @@ fn centred() -> gpui_kit::Div {
         .min_h_0()
         .items_center()
         .justify_center()
-        .gap(rems(0.4))
+        .gap(rems(0.5))
 }

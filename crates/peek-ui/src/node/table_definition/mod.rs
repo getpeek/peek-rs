@@ -68,6 +68,8 @@ fn row(column: &(String, String), theme: &PeekTheme, is_last: bool) -> impl Into
                 .flex_1()
                 .min_w_0()
                 .truncate()
+                .text_size(rems(0.6875))
+                .font_weight(gpui_kit::FontWeight::MEDIUM)
                 .text_color(theme.fg)
                 .child(name.clone()),
         )

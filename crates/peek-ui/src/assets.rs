@@ -43,12 +43,19 @@ icon_assets!(
         Terminal,
         Key,
         X,
-        // The result node's toolbar.
+        // The result node's toolbar and export menu.
         ChartColumn,
         Download,
         Copy,
         Search,
         Rows3,
+        Braces,
+        Table,
+        Database,
+        // The query node's format button and the chart node's type picker.
+        ListIndentIncrease,
+        ChartLine,
+        ChartArea,
     ]
 );
 
@@ -115,6 +122,12 @@ mod tests {
             IconName::Copy,
             IconName::Search,
             IconName::Rows3,
+            IconName::Braces,
+            IconName::Table,
+            IconName::Database,
+            IconName::ListIndentIncrease,
+            IconName::ChartLine,
+            IconName::ChartArea,
         ];
         for icon in named {
             let path = icon.path();

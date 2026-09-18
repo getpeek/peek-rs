@@ -10,7 +10,7 @@
 //! else — the reference renders it only while the suggestion is non-empty — so shipping it
 //! alone would be a button that writes an empty query over a real one. Both arrive together
 //! with the agent backend in M6, along with the node's self-resize to suggestion height + 250.
-//! Whoever adds those buttons must keep them out of the outer resize band and the top 32:
+//! Whoever adds those buttons must keep them out of the outer resize band and the header band:
 //! `peek_canvas::hit::node_hit_at` claims those bands for resize and header drag in world
 //! space, so a control there never sees the press.
 //!
@@ -60,8 +60,8 @@ pub(crate) fn body(
                 .min_h_0()
                 .overflow_hidden()
                 .p(rems(1.0))
-                .text_size(rems(0.75))
-                .line_height(rems(1.125))
+                .text_size(rems(0.78125))
+                .line_height(rems(1.171_875))
                 .text_color(theme.fg)
                 .child(message),
         )

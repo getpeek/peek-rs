@@ -20,7 +20,9 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{Icon, Sizable, StyledExt};
 use gpui_kit::prelude::*;
-use gpui_kit::{AnyElement, App, Div, Hsla, Pixels, Rems, SharedString, Window, div, rems};
+use gpui_kit::{
+    AnyElement, App, Div, FontWeight, Hsla, Pixels, Rems, SharedString, Window, div, rems,
+};
 use peek_document::{Node, NodeType};
 use peek_theme::{ActivePeekTheme, PeekTheme, ResolvedFrame, TypeIndicator};
 
@@ -136,7 +138,7 @@ fn close_button(node: &SharedString, close: CloseHandler) -> impl IntoElement {
     Button::new(SharedString::from(format!("{node}-close")))
         .ghost()
         .xsmall()
-        .size(rems(1.125))
+        .size(rems(1.375))
         .p_0()
         .flex_shrink_0()
         .tooltip("Delete")
@@ -146,7 +148,7 @@ fn close_button(node: &SharedString, close: CloseHandler) -> impl IntoElement {
 
 fn indicator(kind: TypeIndicator, accent: Hsla) -> Div {
     match kind {
-        TypeIndicator::Dot => div().size(rems(0.5)).rounded_full().bg(accent),
+        TypeIndicator::Dot => div().size(rems(0.4375)).rounded_full().bg(accent),
         TypeIndicator::Tick => div().w(rems(0.1875)).h(rems(0.875)).bg(accent),
     }
 }
@@ -185,7 +187,7 @@ fn corner_brackets(theme: &PeekTheme, selected: bool) -> Vec<Div> {
 }
 
 impl RenderOnce for NodeShell {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.peek_theme();
         let accent = theme.node_type(self.node_type);
         let label = self.node_type.map_or("NODE", NodeType::label);
@@ -211,6 +213,20 @@ impl RenderOnce for NodeShell {
             .bg(theme.node_bg)
             .border_1()
             .border_color(border)
+            .when_some(theme.node_shadow, |card, (offset_y, blur, color)| {
+                // A themed shadow is authored in pixels at zoom 1, so it has to be scaled by
+                // hand: gpui takes `Pixels` here and the canvas' rem scope does not reach it.
+                card.shadow(vec![gpui_kit::BoxShadow {
+                    color,
+                    offset: gpui_kit::point(
+                        gpui_kit::px(0.0),
+                        scaled_px(f32::from(offset_y), window),
+                    ),
+                    blur_radius: scaled_px(f32::from(blur), window),
+                    spread_radius: gpui_kit::px(0.0),
+                    inset: false,
+                }])
+            })
             .text_size(rems(0.8125))
             .line_height(rems(1.25))
             .text_color(theme.fg)
@@ -218,22 +234,48 @@ impl RenderOnce for NodeShell {
             .child(
                 div()
                     .h_flex()
+                    .items_center()
                     .gap(rems(0.5))
-                    .px(rems(0.75))
-                    .h(rems(2.0))
+                    .pl(rems(0.75))
+                    .pr(rems(0.5))
+                    .py(rems(0.5))
+                    .min_h(rems(2.25))
                     .flex_shrink_0()
                     .border_b_1()
                     .border_color(theme.node_border)
                     .child(indicator(theme.type_indicator, accent))
+                    // `.type-label`: the kind reads as the node's name, so it carries the
+                    // header's weight and colour; the title beside it is the quieter subtitle.
                     .child(
                         div()
-                            .text_size(rems(0.625))
-                            .text_color(theme.fg_muted)
+                            .flex_none()
+                            .text_size(rems(0.75))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.fg)
                             .child(label),
                     )
-                    .child(div().flex_1().min_w_0().truncate().child(self.title))
-                    .children(self.header_extras)
-                    .children(close),
+                    // `.node-name`
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(rems(0.6875))
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(theme.fg_subtle)
+                            .child(self.title),
+                    )
+                    // `.header-actions`: the kind's own controls and the close button sit
+                    // tight against each other, apart from the title's 8 px gap.
+                    .child(
+                        div()
+                            .h_flex()
+                            .items_center()
+                            .gap(rems(0.125))
+                            .flex_none()
+                            .children(self.header_extras)
+                            .children(close),
+                    ),
             )
             .child(div().flex_1().min_h_0().overflow_hidden().child(self.body))
             .children(corner_brackets(theme, self.selected))

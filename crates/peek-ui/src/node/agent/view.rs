@@ -618,11 +618,14 @@ fn banner(warning: &SharedString, cx: &App) -> gpui_kit::AnyElement {
     gpui_kit::div()
         .h_flex()
         .items_center()
-        .gap(gpui_kit::rems(0.4))
-        .px(gpui_kit::rems(0.75))
-        .py(gpui_kit::rems(0.4))
+        .gap(gpui_kit::rems(0.5))
+        .px(gpui_kit::rems(0.625))
+        .py(gpui_kit::rems(0.4375))
         .border_b_1()
         .border_color(theme.node_border)
+        // `.acp-banner` sits on the inset fill, which is what separates it from the transcript
+        // below it without needing a second border.
+        .bg(theme.node_inset)
         .child(
             gpui_kit::component::Icon::new(gpui_kit::assets::IconName::TriangleAlert)
                 .size(gpui_kit::rems(0.875))
@@ -630,7 +633,7 @@ fn banner(warning: &SharedString, cx: &App) -> gpui_kit::AnyElement {
         )
         .child(
             gpui_kit::div()
-                .text_size(gpui_kit::rems(0.68))
+                .text_size(gpui_kit::rems(0.6875))
                 .text_color(theme.fg_muted)
                 .child(warning.clone()),
         )

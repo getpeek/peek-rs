@@ -6,7 +6,9 @@ mod columns;
 mod plot;
 
 use gpui_kit::TestSupportExt;
-use gpui_kit::component::StyledExt;
+use gpui_kit::assets::IconName;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{Icon, StyledExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{AnyElement, App, Div, ElementId, Entity, SharedString, Window, div, rems};
 use peek_canvas::Document;
@@ -21,10 +23,11 @@ use plot::{Series, SeriesChart};
 const EMPTY_MESSAGE: &str = "No results";
 
 /// The toggle's buttons, in `BarChartNode.tsx`'s order.
-const CHART_TYPES: [(ChartType, &str); 3] = [
-    (ChartType::Bar, "Bar"),
-    (ChartType::Line, "Line"),
-    (ChartType::Area, "Area"),
+/// The three segments of `.chart-type-toggle`, each a glyph with its name as the tooltip.
+const CHART_TYPES: [(ChartType, &str, IconName); 3] = [
+    (ChartType::Bar, "Bar", IconName::ChartColumn),
+    (ChartType::Line, "Line", IconName::ChartLine),
+    (ChartType::Area, "Area", IconName::ChartArea),
 ];
 
 /// `chartType` is optional on disk; `BarChartNode.tsx` reads a missing one as a bar chart.
@@ -95,6 +98,7 @@ pub(crate) fn body(
             div()
                 .text_size(rems(0.6875))
                 .text_color(theme.fg_muted)
+                .mb(rems(0.5))
                 .child(format!("by {} · {} points", columns.axis, data.data.len())),
         )
         .children(legend(&series, cx))
@@ -137,7 +141,7 @@ fn chart_type_toggle(
         .border_1()
         .border_color(theme.node_border)
         .text_size(rems(0.625))
-        .children(CHART_TYPES.map(|(next, label)| {
+        .children(CHART_TYPES.map(|(next, label, icon)| {
             let selected = next == current;
             let (node, document) = (id.clone(), document.clone());
             div()
@@ -145,8 +149,9 @@ fn chart_type_toggle(
                 .test_support()
                 .h_flex()
                 .items_center()
+                .justify_center()
+                .w(rems(1.5))
                 .h(rems(1.375))
-                .px(rems(0.375))
                 .rounded(rems(0.25))
                 .text_color(if selected { theme.fg } else { theme.fg_subtle })
                 .when(selected, |button| button.bg(theme.accent_bg))
@@ -154,7 +159,8 @@ fn chart_type_toggle(
                     let (background, ink) = (theme.node_bg, theme.fg);
                     button.hover(move |style| style.bg(background).text_color(ink))
                 })
-                .child(label)
+                .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
+                .child(Icon::new(icon).size(rems(0.875)))
                 .on_click(move |_, _, cx| {
                     document.update(cx, |document, cx| {
                         if document.update_data::<BarChartData>(&node, |data| {

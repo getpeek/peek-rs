@@ -11,10 +11,11 @@ use peek_document::{Edge, EdgeId, Node, NodeId, NodeKind, Page};
 
 use crate::edge::{EdgeCurve, curve_between};
 
-/// Height of `NodeShell`'s header in world units: `rems(2.0)` against the 16 px base rem.
+/// Height of `NodeShell`'s header in world units: `.app-node-header`'s `min-height: 36px`,
+/// which the shell reaches as `rems(0.5)` of padding either side of one `rems(1.25)` line.
 /// The shell is laid out inside a rem scope of `base_rem * zoom`, so the header covers the
 /// same world band at every zoom level.
-pub const HEADER_WORLD_HEIGHT: f64 = 32.0;
+pub const HEADER_WORLD_HEIGHT: f64 = 36.0;
 
 /// How far inside an edge still counts as a resize grab, in **screen** pixels: the band is
 /// converted to world units by the camera's zoom, so the grab stays the same width under the

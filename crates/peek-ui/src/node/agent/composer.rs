@@ -9,7 +9,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::{AnyElement, Context, Focusable, Window, div, rems};
 use peek_theme::ActivePeekTheme;
 
-use crate::node::{TextInsetExt, scaled};
+use crate::node::TextInsetExt;
 
 use super::view::AgentView;
 
@@ -30,9 +30,10 @@ pub(super) fn render(
         .test_support()
         .h_flex()
         .items_end()
-        .gap(rems(0.45))
+        .gap(rems(0.375))
         .w_full()
-        .p(rems(0.5))
+        .px(rems(0.625))
+        .py(rems(0.5))
         .border_t_1()
         .border_color(theme.node_border)
         .bg(theme.node_bg)
@@ -45,24 +46,17 @@ pub(super) fn render(
             }
         })
         .child(
-            // The box is drawn here rather than by the textarea, whose own frame would sit a
-            // fixed number of screen pixels away from the text and paint outside itself once
-            // `scaled_text_inset` pulls the frame back onto the camera.
-            div()
-                .flex_1()
-                .min_w_0()
-                .bg(theme.node_inset)
-                .border_1()
-                .border_color(theme.node_border)
-                .rounded(scaled(theme.radius_card))
-                .child(
-                    Textarea::new(view.composer())
-                        .disabled(loading)
-                        .appearance(false)
-                        .bordered(false)
-                        .text_size(rems(0.78125))
-                        .scaled_text_inset(window),
-                ),
+            // `.chat-input` draws no box of its own: the composer's top border and the node's
+            // own background are the whole frame, so the message reads as part of the
+            // transcript rather than as a field bolted underneath it.
+            div().flex_1().min_w_0().child(
+                Textarea::new(view.composer())
+                    .disabled(loading)
+                    .appearance(false)
+                    .bordered(false)
+                    .text_size(rems(0.78125))
+                    .scaled_text_inset(window),
+            ),
         )
         .child(button(loading, empty, window, cx))
         .into_any_element()
@@ -87,9 +81,9 @@ fn button(
         .primary()
         .when(loading, ButtonVariants::danger)
         .disabled(!loading && empty)
-        .size(rems(1.875))
+        .size(rems(2.0))
         .tooltip(tooltip)
-        .child(Icon::new(icon).size(rems(1.0)))
+        .child(Icon::new(icon).size(rems(1.25)))
         .on_click(cx.listener(move |view, _, window, cx| {
             if loading {
                 view.stop(cx);

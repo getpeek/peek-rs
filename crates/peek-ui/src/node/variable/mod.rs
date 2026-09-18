@@ -629,8 +629,23 @@ impl VariableEditor {
                 Button::new(("variable-list-chip", key))
                     .ghost()
                     .xsmall()
-                    .selected(filled > 0)
-                    .label(label)
+                    .p_0()
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(rems(0.625))
+                            .py(rems(0.125))
+                            .rounded_full()
+                            .bg(theme.accent_bg)
+                            .text_size(rems(0.6875))
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                            .text_color(if filled > 0 {
+                                theme.accent
+                            } else {
+                                theme.fg_subtle
+                            })
+                            .child(label),
+                    )
                     .tooltip("Edit the list")
                     .on_click(cx.listener(move |editor, _, _, cx| {
                         editor.toggle_expanded(key, cx);
@@ -667,7 +682,7 @@ impl VariableEditor {
                     .xsmall()
                     .compact()
                     .selected(is_list)
-                    .label("[ ]")
+                    .icon(IconName::Brackets)
                     .tooltip(if is_list {
                         "Convert to a single value"
                     } else {
@@ -765,8 +780,8 @@ impl VariableEditor {
             .items_center()
             .justify_between()
             .flex_shrink_0()
-            .h(rems(2.0))
-            .px(rems(0.5))
+            .px(rems(0.75))
+            .py(rems(0.5))
             .border_t_1()
             .border_color(theme.node_border)
             .child(

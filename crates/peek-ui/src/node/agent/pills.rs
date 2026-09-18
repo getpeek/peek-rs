@@ -5,7 +5,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{Icon, StyledExt};
+use gpui_kit::component::{Icon, Sizable, StyledExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{AnyElement, App, Entity, SharedString, div, rems};
 use peek_document::AgentProvider;
@@ -70,24 +70,37 @@ fn label_of(provider: AgentProvider) -> &'static str {
     }
 }
 
+/// `.acp-mode-pill`: a bordered capsule on the inset fill, so the two header controls read as
+/// settings rather than as more of the title.
 fn pill(id: &'static str, label: String, cx: &App) -> Button {
     let theme = cx.peek_theme();
-    Button::new(SharedString::from(id)).ghost().child(
-        div()
-            .h_flex()
-            .items_center()
-            .gap(rems(0.25))
-            .child(
-                div()
-                    .text_size(rems(0.62))
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .text_color(theme.fg_muted)
-                    .child(label),
-            )
-            .child(
-                Icon::new(IconName::ChevronDown)
-                    .size(rems(0.75))
-                    .text_color(theme.fg_subtle),
-            ),
-    )
+    Button::new(SharedString::from(id))
+        .ghost()
+        .xsmall()
+        .p_0()
+        .child(
+            div()
+                .h_flex()
+                .items_center()
+                .gap(rems(0.25))
+                .pl(rems(0.5))
+                .pr(rems(0.375))
+                .py(rems(0.1875))
+                .rounded_full()
+                .border_1()
+                .border_color(theme.node_border)
+                .bg(theme.node_inset)
+                .child(
+                    div()
+                        .text_size(rems(0.65625))
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .text_color(theme.fg_muted)
+                        .child(label),
+                )
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(rems(0.75))
+                        .text_color(theme.fg_subtle),
+                ),
+        )
 }
