@@ -380,6 +380,96 @@ can intercept it with `on_key_down` or even `capture_key_down`. Handle the actio
 card, which sits below the canvas on the focus path, and `stop_propagation`; a second escape then
 reaches the canvas and clears the selection.
 
+## Regions and wayfinding
+
+`peek_canvas::regions` and `peek-ui/src/canvas/wayfinding/`, the port of
+`~/labs/peek/src/canvas/wayfinding/`. The thing to know first: **a region is not a drawn
+rectangle.** It is a named, coloured *set of node ids* with no geometry of its own
+(`Region { id, name, desc, colorIndex, status, memberIds }`, frozen on disk). Its box is
+re-derived every frame from the members that still exist, inflated by `REGION_PADDING` (56).
+So there is no drag-to-draw, no resize, no z-order, and no spatial containment: moving a node
+under a region's box does not join it, and the only way to move a region is to drag its beacon,
+which translates the members.
+
+`member_ids` is allowed to name deleted nodes — `regions::derive` filters them out, which is
+what keeps deletion and undo simple — but a region whose members are *all* gone is dropped, by
+`Document::prune_empty_regions` inside the same transaction the removal opened. That is
+`state.ts:pruneEmptyRegions`, and it is why deleting a region's last node and the region itself
+are one undo step.
+
+**Membership is exclusive.** Grouping claims nodes from whatever region held them, and a region
+the claim empties goes with them. `Document::group_plan` is the whole of ⌘G's decision, pure and
+unit-tested: fewer than two nodes selected, or a selection that is already exactly one region's
+members, is `Unavailable`; a selection touching exactly one region is `FoldInto` (the region
+grows and keeps its name); anything else is `Create`.
+
+### The cross-fade
+
+`regions::crossfade` is `crossFade.ts`: `t = clamp01((0.35 - zoom) / 0.14)`, so the camera is
+reading at `t = 0` and navigating at `t = 1`. Everything reads it — the confirmed halos take it
+as their opacity, beacons fade in with it and become pointer-interactive past 0.35, peekers fade
+out at `1 - t * 1.4`, and past `DIM_THRESHOLD_T` (0.4) the nodes drop to 0.42 and the edges to
+0.35. `lod.rs` draws its own line a little earlier (0.32) and for a different reason: it stops
+*building* bodies rather than dimming them.
+
+### Halos are painted over the nodes
+
+The one world-space surface. `CanvasElement`'s paint order is
+`grid → edges → node elements → halos → selection rings → stroke → marquee`, and the halos being
+**above** the cards is load-bearing rather than incidental: React Flow's `ViewportPortal` mounts
+into `.react-flow__viewport-portal`, the last child of the viewport, and a confirmed halo is a
+veil of the *canvas background colour* — painted underneath the cards it would do nothing at all.
+Every halo is pointer-transparent, so hit testing is untouched.
+
+gpui has no radial gradient (`Background` is solid, linear, slash or checkerboard), so the CSS's
+`radial-gradient(ellipse 80% 80% …)` is rebuilt as twelve concentric rounded quads scaled about
+the box's centre, each adding the *difference* between neighbouring stops rather than the stop
+itself. Scaled rather than inset, because a uniform inset collapses the inner bands of a wide
+region to nothing. A confirmed halo is only painted at all once `t > 0`, so at working zoom it
+costs nothing.
+
+Suggested regions are different: a dashed 1.5 px box in the region's colour over a 4 % fill,
+visible at *every* zoom, because it is asking for a decision. The flash ring that marks a fold
+is its own box for the same reason the suggested one is always visible — a confirmed halo is
+transparent at the zoom where folding happens — and `CanvasView::tick_flash` requests the frames
+it fades over, since nothing else on the canvas is moving when one appears.
+
+### Beacons, peekers and the review card are chrome
+
+All three are late children of `CanvasView`, outside the rem scope, so they keep a constant
+screen size at every zoom — a way of *reaching* a region is not part of it, and the review card
+is a surface you act through. The reference has to counter-scale its card by `1 / zoom` to get
+the same thing, because its card lives inside the zoomed viewport.
+
+A beacon owns its press: the canvas registers its pointer listeners before this element paints,
+so gpui's reverse bubble order offers the press here first and stopping it is what keeps a press
+on a beacon from also starting a marquee. The release, though, does **not** arrive here — the
+press repaints, and the frame it produces carries the full-window drag catcher, which occludes
+the beacon. So click-versus-drag is decided in `beacons::end_drag`, off the region id the press
+recorded; an `on_click` could not do it either, because the click fires after the release has
+already cleared the state it would have to read.
+
+Peekers are a transient compass rather than a permanent one: `Wayfinding::nudged_at` is re-armed
+by every camera change and by the pointer resting on a label, and they fade 900 ms after the last
+nudge. The arrow is one of eight compass glyphs rather than the reference's rotated SVG triangle,
+because gpui has no self-relative rotation on a div.
+
+`useCanvasWheelForward.ts` needs no port: the canvas registers its wheel listener at the top of
+`paint` and these overlays paint later, so a wheel over a beacon already reaches the canvas.
+
+### The picker
+
+`wayfinding/menu.rs`, a 280 px panel above the zoom cluster, hand-owned for the reasons
+`title_bar/pages/panel.rs` records — a field inside a `Popover` never sees a space, and the press
+that dismisses one has to be swallowed before it reaches the canvas. It is the only way to reach
+a region by name, and the only place a region created by ⌘G gets one: `Region::GroupSelection`
+opens it with the new region in rename mode rather than inventing a name and leaving it.
+
+Two re-entrancy rules the panel had to learn, both the same shape. `open_renaming` and `close`
+are called from inside a `CanvasView` listener, where that entity is leased — so neither may read
+the canvas back. The cursor is moved to the renaming row in `render` instead, and focus is handed
+back through a `restore_focus` handle captured on open rather than by asking the canvas for one.
+
 ## Keyboard navigation
 
 Three ways to move between nodes without the mouse, all ported from the reference. The maths and

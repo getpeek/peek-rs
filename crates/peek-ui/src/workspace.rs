@@ -339,11 +339,22 @@ impl WorkspaceView {
         self.canvas.read(cx).cursor()
     }
 
-    fn toggle_ui(&mut self, _: &actions::view::ToggleUi, _: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_ui(
+        &mut self,
+        _: &actions::view::ToggleUi,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.ui_visible = !self.ui_visible;
         let visible = self.ui_visible;
-        self.canvas
-            .update(cx, |canvas, cx| canvas.set_chrome_visible(visible, cx));
+        self.canvas.update(cx, |canvas, cx| {
+            canvas.set_chrome_visible(visible, cx);
+            // Hiding the chrome takes the regions picker's trigger with it, which would leave
+            // an open panel with no visible way back out of it.
+            if !visible {
+                canvas.close_regions_picker(window, cx);
+            }
+        });
         cx.notify();
     }
 

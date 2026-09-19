@@ -113,6 +113,13 @@ pub mod view {
     actions!(View, [ToggleUi, ToggleCameraLock, Organize, Schema]);
 }
 
+/// Region commands. `GroupSelection` and `UngroupSelection` act on the selection;
+/// `OpenPicker` raises the regions menu in the zoom cluster.
+pub mod region {
+    use super::actions;
+    actions!(Region, [GroupSelection, UngroupSelection, OpenPicker]);
+}
+
 pub mod export {
     use super::actions;
     actions!(Export, [Csv, Json]);
@@ -120,7 +127,10 @@ pub mod export {
 
 pub mod settings {
     use super::actions;
-    actions!(Settings, [ToggleCommandPaletteButton, TogglePageDisplay]);
+    actions!(
+        Settings,
+        [ToggleCommandPaletteButton, TogglePageDisplay, ToggleRegions]
+    );
 }
 
 pub mod help {

@@ -23,6 +23,8 @@ icon_assets!(
         Brackets,
         Lock,
         LockOpen,
+        // The regions picker's trigger, in the zoom cluster.
+        Map,
         ChevronDown,
         // The agent node.
         ChevronRight,

@@ -12,6 +12,7 @@ pub struct Scope {
     pub queries: usize,
     pub pages: usize,
     pub history: HistoryScope,
+    pub regions: RegionScope,
     pub camera_locked: bool,
     pub chrome_hidden: bool,
     pub connected: bool,
@@ -22,12 +23,27 @@ pub struct Scope {
     pub settings: SettingsScope,
 }
 
+/// What the region commands need to know, kept together like [`HistoryScope`] so each of them
+/// reads one thing rather than three loose counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RegionScope {
+    /// Regions on the active page with at least one live member.
+    pub count: usize,
+    /// The selection would create or grow a region — [`crate::GroupPlan`] says which.
+    pub can_group: bool,
+    /// Grouping would grow an existing region rather than mint one, so the command can say so.
+    pub can_fold: bool,
+    /// Some selected node sits in a region, so there is something to pull out.
+    pub can_ungroup: bool,
+}
+
 /// The slice of `settings.json` the palette's labels read. Kept in its own struct, like
 /// [`HistoryScope`], so the next toggle adds a field here rather than another loose bool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SettingsScope {
     pub pages_as_list: bool,
     pub palette_button_hidden: bool,
+    pub regions_enabled: bool,
 }
 
 /// Undo availability for the active page, kept together so commands read one thing.

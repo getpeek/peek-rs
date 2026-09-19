@@ -13,7 +13,8 @@ use peek_document::{
 };
 
 use crate::history::{EditKind, History};
-use crate::scope::{HistoryScope, Scope};
+use crate::regions::GroupPlan;
+use crate::scope::{HistoryScope, RegionScope, Scope};
 
 /// `useDrawTool.ts`'s three constants. The width is document data rather than a theme role, and
 /// the colour is the CSS token the frozen format stores, resolved against the live theme when
@@ -655,6 +656,9 @@ impl Document {
         page.edges.retain(|edge| !edges.contains(&edge.id));
         removed += before - page.edges.len();
         if removed > 0 {
+            // Inside the transaction above, so a region losing its last node goes with it in
+            // the same undo step rather than leaving a label over nothing.
+            self.prune_empty_regions();
             self.prune_selection();
             self.touch();
         }
@@ -814,6 +818,20 @@ impl Document {
 
     // ---- scope -------------------------------------------------------------------------
 
+    /// Regions with at least one member still on the page — what the picker would list. A
+    /// region whose members are all gone has no box and so is not on the canvas at all.
+    fn live_region_count(&self) -> usize {
+        self.regions()
+            .iter()
+            .filter(|region| {
+                region
+                    .member_ids
+                    .iter()
+                    .any(|id| self.nodes().iter().any(|node| &node.id == id))
+            })
+            .count()
+    }
+
     #[must_use]
     pub fn scope(&self) -> Scope {
         let kind_count = |kind: NodeType| {
@@ -838,6 +856,15 @@ impl Document {
             history: HistoryScope {
                 can_undo: self.history.can_undo(self.active_page_id()),
                 can_redo: self.history.can_redo(self.active_page_id()),
+            },
+            regions: {
+                let plan = self.group_plan();
+                RegionScope {
+                    count: self.live_region_count(),
+                    can_group: plan != GroupPlan::Unavailable,
+                    can_fold: matches!(plan, GroupPlan::FoldInto(_)),
+                    can_ungroup: !self.grouped_selection().is_empty(),
+                }
             },
             ..Scope::default()
         }
@@ -1011,6 +1038,33 @@ mod tests {
         assert!(document.deselect_all());
         assert!(document.selected().is_empty() && document.selected_edges().is_empty());
         assert!(!document.deselect_all(), "no-op reports no change");
+    }
+
+    /// A region whose members are all gone has no box, so the picker would not list it — and
+    /// `RegionScope::count` is what the picker's command reads.
+    #[test]
+    fn scope_counts_only_regions_that_still_have_a_member() {
+        let mut document = document();
+        let alive = document.nodes()[0].id.clone();
+        document.group_nodes(
+            vec![alive],
+            crate::NewRegion {
+                name: "alive".to_string(),
+                desc: String::new(),
+                status: peek_document::RegionStatus::Confirmed,
+            },
+        );
+        document.group_nodes(
+            vec![NodeId::from("ghost")],
+            crate::NewRegion {
+                name: "dead".to_string(),
+                desc: String::new(),
+                status: peek_document::RegionStatus::Confirmed,
+            },
+        );
+
+        assert_eq!(document.regions().len(), 2);
+        assert_eq!(document.scope().regions.count, 1);
     }
 
     #[test]

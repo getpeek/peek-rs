@@ -13,6 +13,7 @@
 mod execution;
 mod layout;
 mod navigation;
+mod regions;
 mod result;
 mod shell;
 
@@ -33,6 +34,7 @@ pub(super) fn register<E: InteractiveElement>(element: E, cx: &mut Context<Canva
     let element = navigation::register(element, cx);
     let element = result::register(element, cx);
     let element = layout::register(element, cx);
+    let element = regions::register(element, cx);
     shell::register(element, cx)
 }
 

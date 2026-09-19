@@ -31,15 +31,19 @@ pub(crate) fn stroke_width(state: EdgeState) -> f64 {
     }
 }
 
+/// `dim` is 1 at working zoom and drops as the region beacons take over, which is
+/// `wayfinding.css`'s `.react-flow__edges { opacity }`. A painted path inherits no style, so
+/// the fade has to be folded into the colour here.
 pub(crate) fn paint(
     bounds: Bounds<Pixels>,
     camera: Camera,
     items: &[EdgeItem],
+    dim: f32,
     window: &mut Window,
 ) {
     for item in items {
         if let Some(path) = trace(item, camera, bounds.origin) {
-            window.paint_path(path, item.color);
+            window.paint_path(path, item.color.opacity(dim));
         }
     }
 }

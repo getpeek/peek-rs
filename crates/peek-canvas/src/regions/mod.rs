@@ -6,10 +6,18 @@
 //!
 //! `history::Snapshot` already captures `page.regions`, so undo works without a history change.
 
+pub mod crossfade;
+pub mod derive;
+pub mod peeker;
+mod plan;
+
 use peek_document::{NodeId, REGION_COLOR_COUNT, Region, RegionId, RegionStatus};
 
 use crate::history::EditKind;
 use crate::model::Document;
+
+pub use derive::{Derived, REGION_PADDING};
+pub use plan::GroupPlan;
 
 /// What a caller chooses when grouping; the id and the colour are the document's to assign.
 #[derive(Debug, Clone)]
@@ -63,6 +71,50 @@ impl Document {
         true
     }
 
+    /// Renames a region on the active page, and **confirms it**: in the reference, typing a
+    /// name over an AI suggestion is how you accept it (`useRegionActions.ts`), so there is no
+    /// separate "keep" step to forget. `false` when it is not here.
+    pub fn rename_region(&mut self, region: &RegionId, name: String) -> bool {
+        self.edit_region(region, |region| {
+            region.name = name;
+            region.status = RegionStatus::Confirmed;
+        })
+    }
+
+    /// Accepts a suggestion without renaming it. `false` when it is not here.
+    pub fn confirm_region(&mut self, region: &RegionId) -> bool {
+        self.edit_region(region, |region| region.status = RegionStatus::Confirmed)
+    }
+
+    /// Pulls `members` out of whatever region holds them, dropping the regions that empties.
+    /// `false` when none of them were grouped, in which case nothing is recorded.
+    pub fn remove_from_regions(&mut self, members: &[NodeId]) -> bool {
+        if !self.regions().iter().any(|region| {
+            region
+                .member_ids
+                .iter()
+                .any(|member| members.contains(member))
+        }) {
+            return false;
+        }
+        self.begin(EditKind::Structure);
+        claim(&mut self.active_page_mut().regions, members, None);
+        self.touch();
+        true
+    }
+
+    /// Drops every region on the active page whose members are all gone.
+    ///
+    /// The reference runs this on every node write (`state.ts:pruneEmptyRegions`); here it is
+    /// called from the one structural removal, inside the transaction that is already open, so
+    /// deleting a region's last node and the region itself are a single undo step.
+    pub(crate) fn prune_empty_regions(&mut self) {
+        let live: Vec<NodeId> = self.nodes().iter().map(|node| node.id.clone()).collect();
+        self.active_page_mut()
+            .regions
+            .retain(|region| region.member_ids.iter().any(|id| live.contains(id)));
+    }
+
     /// Deletes a region on the active page. Its members are untouched — they become ungrouped.
     pub fn remove_region(&mut self, region: &RegionId) -> bool {
         if !self.has_region(region) {
@@ -80,6 +132,25 @@ impl Document {
     #[must_use]
     pub fn regions(&self) -> &[Region] {
         &self.active_page().regions
+    }
+
+    /// Applies `edit` to one region on the active page as its own undo step. The two callers
+    /// differ only in what they write, and both have to refuse an unknown id the same way.
+    fn edit_region(&mut self, region: &RegionId, edit: impl FnOnce(&mut Region)) -> bool {
+        if !self.has_region(region) {
+            return false;
+        }
+        self.begin(EditKind::Structure);
+        if let Some(target) = self
+            .active_page_mut()
+            .regions
+            .iter_mut()
+            .find(|candidate| &candidate.id == region)
+        {
+            edit(target);
+        }
+        self.touch();
+        true
     }
 
     #[must_use]
@@ -107,13 +178,13 @@ fn claim(regions: &mut Vec<Region>, members: &[NodeId], keep: Option<&RegionId>)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::NewRegion;
     use crate::Document;
     use peek_document::geometry::{Point, Rect, Size};
     use peek_document::{CanvasDocument, Node, NodeId, NodeKind, QueryData, RegionStatus};
 
-    fn document() -> Document {
+    pub(crate) fn document() -> Document {
         let mut persisted = CanvasDocument::empty();
         let page = persisted
             .pages
@@ -131,7 +202,7 @@ mod tests {
         Document::load(persisted)
     }
 
-    fn suggested(name: &str) -> NewRegion {
+    pub(crate) fn suggested(name: &str) -> NewRegion {
         NewRegion {
             name: name.to_string(),
             desc: String::new(),
@@ -139,7 +210,7 @@ mod tests {
         }
     }
 
-    fn ids(names: &[&str]) -> Vec<NodeId> {
+    pub(crate) fn ids(names: &[&str]) -> Vec<NodeId> {
         names.iter().map(|name| NodeId::from(*name)).collect()
     }
 
@@ -229,6 +300,82 @@ mod tests {
 
         assert!(!document.add_to_region(&absent, ids(&["a"])));
         assert!(!document.remove_region(&absent));
+    }
+
+    #[test]
+    fn renaming_a_suggestion_accepts_it() {
+        let mut document = document();
+        let region = document.group_nodes(ids(&["a", "b"]), suggested("Region 1"));
+
+        assert!(document.rename_region(&region, "Churn".to_string()));
+        assert_eq!(document.regions()[0].name, "Churn");
+        assert_eq!(document.regions()[0].status, RegionStatus::Confirmed);
+    }
+
+    #[test]
+    fn confirming_keeps_the_name_it_was_given() {
+        let mut document = document();
+        let region = document.group_nodes(ids(&["a", "b"]), suggested("Billing"));
+
+        assert!(document.confirm_region(&region));
+        assert_eq!(document.regions()[0].name, "Billing");
+        assert_eq!(document.regions()[0].status, RegionStatus::Confirmed);
+    }
+
+    #[test]
+    fn removing_members_leaves_the_region_its_others() {
+        let mut document = document();
+        document.group_nodes(ids(&["a", "b", "c"]), suggested("first"));
+
+        assert!(document.remove_from_regions(&ids(&["b"])));
+        assert_eq!(document.regions()[0].member_ids, ids(&["a", "c"]));
+    }
+
+    #[test]
+    fn removing_the_last_members_takes_the_region_with_them() {
+        let mut document = document();
+        document.group_nodes(ids(&["a", "b"]), suggested("first"));
+
+        assert!(document.remove_from_regions(&ids(&["a", "b"])));
+        assert!(document.regions().is_empty());
+    }
+
+    /// Nothing to remove has to be distinguishable from having removed something, or the
+    /// command would open an undo step for a keypress that changed nothing.
+    #[test]
+    fn removing_ungrouped_nodes_records_nothing() {
+        let mut document = document();
+        document.group_nodes(ids(&["a", "b"]), suggested("first"));
+        let revision = document.revision();
+
+        assert!(!document.remove_from_regions(&ids(&["c"])));
+        assert_eq!(document.revision(), revision);
+    }
+
+    /// `Page::remove_node` deliberately leaves membership alone, so this is the only thing
+    /// stopping a deleted node's region from outliving everything it named.
+    #[test]
+    fn deleting_the_last_member_prunes_the_region_in_the_same_undo_step() {
+        let mut document = document();
+        document.group_nodes(ids(&["a", "b"]), suggested("first"));
+        document.checkpoint();
+
+        document.remove_nodes(&ids(&["a", "b"]));
+        document.checkpoint();
+        assert!(document.regions().is_empty());
+
+        assert!(document.undo());
+        assert_eq!(document.regions().len(), 1, "one undo brings both back");
+        assert_eq!(document.nodes().len(), 7);
+    }
+
+    #[test]
+    fn deleting_one_member_of_several_keeps_the_region() {
+        let mut document = document();
+        document.group_nodes(ids(&["a", "b"]), suggested("first"));
+
+        document.remove_nodes(&ids(&["a"]));
+        assert_eq!(document.regions().len(), 1);
     }
 
     #[test]

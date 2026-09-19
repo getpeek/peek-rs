@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-09-15.
+Last updated: 2026-09-18.
 
 ## Milestones
 
@@ -14,9 +14,9 @@ Last updated: 2026-09-15.
 | M6 | peek-mcp bridge over the mutation API, peek-acp agent node, local Ollama backend | Done |
 | M7 | peek-multiplayer with an event-sink trait replacing Tauri's `AppHandle` | Not started |
 
-Canvas features that slot in between milestones and are not started: regions and wayfinding
-(the model and its mutations landed with M6's tools, but nothing draws them yet), minimap,
-the history panel, and the Activity node's running-query list.
+Regions and wayfinding are **in** — see below. Canvas features that slot in between milestones
+and are still not started: the minimap, the history panel, the Activity node's running-query
+list, and the two Ollama groupings behind the regions picker.
 
 ## The command palette port
 
@@ -80,11 +80,13 @@ Two honest gaps in the batch's own testing, recorded rather than papered over:
   `~/peek`. Threading a base directory through the view is the fix, whenever a second consumer
   wants it.
 
-Not ported, each blocked on a feature rather than on the command: the region commands (group,
-ungroup, the two AI groupings, the regions toggle), the minimap toggle, "Show running queries",
-"Show history", host/join session, automatic query labels, and `Tool::LassoSelect` — which is a
-freehand selection tool, not a command. Registering any of them would put a row in the palette
-that does nothing.
+The region commands landed with the renderer: `Region::{GroupSelection,UngroupSelection,
+OpenPicker}` on the reference's own `meta-g` / `meta-shift-g` / `r`, plus `Settings::ToggleRegions`.
+
+Not ported, each blocked on a feature rather than on the command: the two AI groupings, the
+minimap toggle, "Show running queries", "Show history", host/join session, automatic query
+labels, and `Tool::LassoSelect` — which is a freehand selection tool, not a command. Registering
+any of them would put a row in the palette that does nothing.
 
 ### M5, in pieces
 
@@ -507,6 +509,54 @@ is not ported. Keyboard cell navigation is absent in the
 reference too, and went out with `DataTable`'s own selection; it is worth adding back on our
 model.
 
+### Regions and wayfinding
+
+The port of `~/labs/peek/src/canvas/wayfinding/`, minus the two Ollama groupings. See
+`docs/canvas.md`, "Regions and wayfinding", for how it works; what follows is what shipped and
+what it cost.
+
+In: the derived geometry (`REGION_PADDING` 56, dangling members filtered, an all-dead region
+skipped), the cross-fade (0.35 → 0.21, nodes to 0.42 and edges to 0.35 past `t = 0.4`), the
+confirmed and suggested halos and the fold flash ring, beacons with drag-to-move and
+click-to-enter, edge peekers with their 900 ms quiet period, the picker in the zoom cluster with
+rename / remove / fly, the Keep–Rename–Dismiss card over a suggestion, and
+`Region::{GroupSelection,UngroupSelection,OpenPicker}` plus `Settings::ToggleRegions` on the
+reference's own keys.
+
+Five mutations joined the three M6 already had: `rename_region` (which **confirms**, because
+typing a name over a proposal is how the reference accepts one), `confirm_region`,
+`remove_from_regions`, `prune_empty_regions`, and `Document::group_plan` — the whole of ⌘G's
+fold-or-create decision, pure and unit-tested away from the view.
+
+Four things this port had to decide that the reference did not:
+
+- **No radial gradient in gpui.** `Background` is solid, linear, slash or checkerboard, so the
+  confirmed halo's `radial-gradient(ellipse 80% 80% …)` pool is twelve concentric rounded quads
+  scaled about the box's centre, each adding the *difference* between neighbouring stops. Scaled
+  rather than inset, because a uniform inset collapses the inner bands of a wide region to
+  nothing. **Whether it bands is a feel-test item** — see below.
+- **Halos paint over the nodes, not under them.** Verified in the vendored source rather than
+  assumed: `.react-flow__viewport-portal` is the last child of `Viewport`, after `NodeRenderer`.
+  It has to be, since the pool is a veil of the canvas background colour.
+- **A beacon's release never reaches the beacon.** The press repaints, and that frame carries the
+  full-window drag catcher, which occludes it. Click-versus-drag is decided in `end_drag` off the
+  region id the press recorded; `on_click` could not do it either, because a click fires after the
+  release has cleared the state it would read.
+- **The palette label cannot name the fold target.** `Command::label` is
+  `fn(&Scope) -> &'static str` over a `Copy` `Scope`, which is what keeps the registry free of
+  gpui; `docs/commands.md` records the trade. `Scope::regions.can_fold` carries the one projectable
+  bit, and the flash ring says which region absorbed the nodes.
+
+One divergence that is a fix rather than a port: `Page::remove_node` deliberately leaves
+membership alone, so **peek-rs had no equivalent of `pruneEmptyRegions` at all** — deleting a
+region's last node left a record for a label over nothing, which would then have been written
+back to the shared document. `Document::remove` now prunes inside the transaction it already
+opened, so the node and its region go in one undo step.
+
+Covered by ~30 unit tests in `peek-canvas/src/regions/` and 16 `#[gpui_kit::test]`s in
+`crates/peek-ui/tests/regions.rs` driving real key and pointer dispatch against the three real
+regions in the `plock-local` fixture.
+
 ### Keyboard navigation
 
 Done: `g` opens Vimium-style jump labels over every visible node, `cmd-arrow` walks the selection
@@ -681,7 +731,7 @@ cargo run -- --workspace <name> --connection <name>   # defaults to the first wo
 cargo run -- --write                                  # enables autosave; read-only otherwise
 cargo run -- --performance                            # level of detail on: distant nodes drop their bodies
 cargo run -- --fps                                    # frame-rate readout beside the zoom cluster
-cargo test --workspace                                # 1,104 tests, a few seconds after the first build
+cargo test --workspace                                # 1,163 tests, a few seconds after the first build
 cargo test -p peek-config -p peek-document -p peek-canvas   # the gpui-free crates, seconds
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
@@ -692,7 +742,10 @@ cargo fmt --all --check
 What to try in the running app: two-finger scroll pans, pinch and cmd+wheel zoom about the
 cursor, middle/right drag and space+drag pan, `cmd-0` reset (200 ms), `cmd-shift-0` fit all
 (300 ms), `cmd-=`/`cmd--` step, `cmd-shift-l` camera lock, `cmd-shift-[`/`]` page switch,
-`cmd-a` / `escape`, `cmd-p` palette, palette → "Change theme".
+`cmd-a` / `escape`, `cmd-p` palette, palette → "Change theme". For regions, open a document that
+has some (`plock/production.json`, `peek/local.json`): zoom out past 35 % for the beacons, drag
+one, pan until a region leaves the viewport for its peeker, `r` for the picker, and ⌘G on two
+selected nodes.
 
 ## The feel-test this milestone owes
 
@@ -721,6 +774,14 @@ sources. Nothing in that harness reads rendered pixels, so these are open until 
   crowds a four-row node when expanded.
 - **Tooltips at high zoom**, which lay out at rem 1 and so do not scale with the node.
 - **BarChart with two series**, the case that motivated the hand-composed plot.
+- **The confirmed region halo, zoomed out past 35 %.** It is twelve stacked quads standing in for
+  a radial gradient, and nothing in the headless harness reads a pixel. Two things to look at:
+  whether the bands are visible as steps, and whether two regions sitting close together show a
+  seam where their veils overlap. A wide, short region is the hard case, since its bands are the
+  most eccentric.
+- **A beacon at the moment the cards fade.** Beacons come in over 0.35 → 0.21 while the nodes
+  drop to 0.42; the two curves are meant to hand over without a moment where both are half
+  visible and neither is readable.
 
 ## Canvas frame cost
 
@@ -809,9 +870,10 @@ listeners, the HUD and the toolbar are rebuilt every frame, which is cheap next 
   places a node, and an unknown id comes back as the reference's own error string. The drain holds
   the workspace, not its canvas, so switching connection moves the agent to the new document
   rather than leaving it editing an orphaned one.
-- **Regions have a mutation API but no renderer.** `group_nodes`, `add_to_region` and
-  `remove_region` write real regions with exclusive membership and undo; nothing draws them yet,
-  so an agent that groups nodes leaves no visible trace. That is milestone order, not a bug.
+- **Regions are drawn, reachable and editable.** See "Regions and wayfinding" above. What is
+  *not* ported is the Ollama grouping — `Region::{GroupWithAi,RegroupAllWithAi}` and the
+  `clusterUngrouped` fallback behind them — so `RegionStatus::Suggested` only ever arrives from
+  an MCP agent's `group_nodes`, which is what the review card exists for.
 - **The ACP session opens on the first prompt, not on mount.** The reference opens eagerly so the
   mode pill and the MCP warning are ready before the first question; here the pill appears after
   the first turn. Opening four sessions when a document loads seemed the worse trade.

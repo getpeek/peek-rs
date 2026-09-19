@@ -14,6 +14,7 @@ mod jump;
 mod page_search;
 mod toolbar;
 mod tools;
+mod wayfinding;
 
 use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
@@ -112,6 +113,14 @@ pub(crate) struct CanvasView {
     /// Whether node bodies are being built at this zoom. Retained because the thresholds
     /// overlap: the tier inside the band is whatever the last frame settled on.
     detail: Detail,
+    /// Regions on screen: the beacon drag, the flash ring and the peekers' quiet period.
+    wayfinding: wayfinding::Wayfinding,
+    /// The regions picker above the zoom cluster. Its own entity, like the pages picker, so a
+    /// rename field can own focus without the canvas re-rendering behind every keystroke.
+    regions: Entity<wayfinding::menu::RegionsPanel>,
+    /// The Keep / Rename / Dismiss cards over suggested regions. Its own entity for the same
+    /// reason the picker is: it owns a rename field, and a field needs focus.
+    suggestions: Entity<wayfinding::card::SuggestionCards>,
 }
 
 impl std::fmt::Debug for CanvasView {
@@ -144,6 +153,9 @@ impl CanvasView {
                 cx.notify();
             }
         });
+        let canvas = cx.entity().downgrade();
+        let regions = cx.new(|cx| wayfinding::menu::RegionsPanel::new(canvas.clone(), window, cx));
+        let suggestions = cx.new(|cx| wayfinding::card::SuggestionCards::new(canvas, window, cx));
         Self {
             node_states: NodeStates::new(document.clone(), cx.entity().downgrade()),
             document,
@@ -167,6 +179,9 @@ impl CanvasView {
             frame_stats: FrameStats::new(crate::settings::Settings::fps(cx)),
             fps_settle: None,
             detail: Detail::Full,
+            wayfinding: wayfinding::Wayfinding::default(),
+            regions,
+            suggestions,
         }
     }
 
@@ -225,6 +240,11 @@ impl CanvasView {
 
     pub(crate) fn is_camera_locked(&self) -> bool {
         self.camera_locked
+    }
+
+    /// Whether the regions picker is up, so the cluster's trigger can show it.
+    pub(crate) fn regions_open(&self, cx: &App) -> bool {
+        self.regions.read(cx).is_open()
     }
 
     /// The table behind a result node, for tests.
@@ -306,6 +326,13 @@ impl CanvasView {
         peek_canvas::lod::detail(self.camera.zoom, self.detail)
     }
 
+    /// Hands focus back to the canvas. Chrome that owned a field calls this on the way out: a
+    /// window left focused on an element that no longer renders silently kills every canvas
+    /// binding, `cmd-z` included.
+    pub(crate) fn take_focus(&self, window: &mut Window, cx: &mut App) {
+        window.focus(&self.focus_handle, cx);
+    }
+
     fn reclaim_focus(&self, window: &mut Window, cx: &mut App) {
         if window.focused(cx).is_none() {
             window.focus(&self.focus_handle, cx);
@@ -322,6 +349,7 @@ impl CanvasView {
                 pages_as_list: settings.ui.pages.show_as == peek_config::PageDisplay::List,
                 palette_button_hidden: settings.ui.titlebar.command_palette_button
                     == peek_config::Visibility::Hide,
+                regions_enabled: settings.canvas.enable_regions,
             },
             ..self.document.read(cx).scope()
         }
@@ -510,6 +538,7 @@ impl CanvasView {
             return;
         }
         self.camera = active.flight.sample(active.flight.progress(elapsed));
+        self.nudge_peekers(cx);
         window.request_animation_frame();
     }
 
@@ -804,7 +833,7 @@ impl CanvasView {
     fn clear_selection(
         &mut self,
         _: &actions::tool::Select,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // Escape stays bound on the bare `Canvas` context, and a bound key never reaches a key
@@ -823,6 +852,13 @@ impl CanvasView {
         // rather than to the result node — which is why the node's own escape rule cannot see
         // it. Cancelling a draft loses more than a selection does, so it goes before them.
         if self.close_json_editor(cx) {
+            return;
+        }
+        // The picker is a panel over the canvas; escape takes it down before it reaches the
+        // selection underneath. Bound actions never reach a key listener, so the panel's own
+        // `on_key_down` only sees escape while its rename field has focus — this covers the
+        // rest.
+        if self.close_regions_picker(window, cx) {
             return;
         }
         self.interaction = Interaction::Idle;
@@ -1189,10 +1225,12 @@ impl CanvasView {
             Effect::Pan(delta) => {
                 self.flight = None;
                 self.camera = self.camera.panned_by(delta);
+                self.nudge_peekers(cx);
             }
             Effect::ZoomAbout { anchor, factor } => {
                 self.flight = None;
                 self.camera = self.camera.zoomed_by_about(anchor, factor);
+                self.nudge_peekers(cx);
             }
             Effect::MarqueeChanged { world, baseline } => {
                 self.document.update(cx, |document, cx| {
@@ -1537,6 +1575,7 @@ impl CanvasView {
         self.reclaim_focus(window, cx);
 
         let ring = cx.peek_theme().clone();
+        let dim = wayfinding::dim(self.camera.zoom).nodes;
         let mut items = Vec::new();
         let mut selected_rects = Vec::new();
         for node in &nodes {
@@ -1545,9 +1584,21 @@ impl CanvasView {
             if selected {
                 selected_rects.push((world, ring.selection_ring(node.node_type())));
             }
+            let element = self.node_element(node, selected, window, cx);
             items.push(NodeItem {
                 world,
-                element: self.node_element(node, selected, window, cx),
+                // Wrapped rather than styled in place: the two kinds of node root (a bare
+                // card, a `NodeShell`) have no shared builder to hang an opacity on, and at
+                // working zoom this branch never runs.
+                element: if dim < 1.0 {
+                    div()
+                        .size_full()
+                        .opacity(dim)
+                        .child(element)
+                        .into_any_element()
+                } else {
+                    element
+                },
             });
         }
         self.frame_stats.tick(items.len(), total_nodes);
@@ -1718,6 +1769,7 @@ impl Render for CanvasView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.tick_flight(window, cx);
         self.tick_layout(window, cx);
+        self.tick_flash(window, cx);
         self.arm_fps_settle(cx);
 
         let started = self.frame_stats.enabled().then(Instant::now);
@@ -1729,9 +1781,13 @@ impl Render for CanvasView {
         let theme = cx.peek_theme().clone();
 
         let (items, selected_rects) = self.node_items(visible, window, cx);
+        let regions = self.derived_regions(cx);
+        let nodes = self.document.read(cx).nodes().to_vec();
 
         let overlay = Overlay {
             edges: self.edge_items(visible, cx),
+            regions: wayfinding::halos(self, &regions, &nodes, cx),
+            edge_dim: wayfinding::dim(camera.zoom).edges,
             selected_rects,
             marquee: self.interaction.marquee_screen_rect(),
             stroke: self.live_stroke(cx),
@@ -1801,6 +1857,17 @@ impl Render for CanvasView {
                     .map(|jump| jump::render(jump, camera, cx)),
             )
             .children(page_search::render(self, cx))
+            // Under the transient surfaces below but over the HUD, as `WayfindingLayer` sits
+            // over the React Flow panels: a beacon is what you navigate by when the cards have
+            // receded, so nothing but a menu should cover it.
+            .children(wayfinding::render(
+                self,
+                &regions,
+                wayfinding::Frame { camera, pane },
+                cx,
+            ))
+            .child(self.suggestions.clone())
+            .child(self.regions.clone())
             // Last of all: the menu is the most transient surface on the canvas, and a press
             // anywhere outside it has to reach its scrim before anything else.
             .children(context_menu::render(self, cx))

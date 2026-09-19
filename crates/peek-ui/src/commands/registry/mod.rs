@@ -14,6 +14,7 @@ pub(super) mod help;
 pub(super) mod history;
 pub(super) mod page;
 pub(super) mod query;
+pub(super) mod region;
 pub(super) mod result;
 pub(super) mod settings;
 pub(super) mod tool;
@@ -30,6 +31,7 @@ pub(super) static GROUPS: &[&[Command]] = &[
     query::ENTRIES,
     result::ENTRIES,
     page::ENTRIES,
+    region::ENTRIES,
     view::ENTRIES,
     agent::ENTRIES,
     export::ENTRIES,

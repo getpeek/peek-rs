@@ -100,24 +100,28 @@ fn sections(overrides: &HashMap<String, String>) -> Vec<Section> {
 
 /// Splits the groups over two columns, as the reference's `column-count: 2` does. A heading
 /// costs about two rows of height, so a group of one is not free.
+///
+/// The cut is the one that leaves the two columns closest in height, rather than the first that
+/// passes half. Filling greedily until half is reached overshoots by however tall the section
+/// that crosses it happens to be, so one group landing on the wrong side of the midpoint —
+/// which is all adding a group elsewhere in the registry does — can leave the columns at 48
+/// rows against 20.
 fn split(sections: Vec<Section>) -> (Vec<Section>, Vec<Section>) {
     fn weight(section: &Section) -> usize {
         section.rows.len() + 2
     }
 
     let total: usize = sections.iter().map(weight).sum();
-    let mut left = Vec::new();
-    let mut right = Vec::new();
-    let mut filled = 0;
-    for section in sections {
-        if filled * 2 < total {
-            filled += weight(&section);
-            left.push(section);
-        } else {
-            right.push(section);
-        }
-    }
-    (left, right)
+    // At least one group each side: two columns with nothing in the second is not a split.
+    let cut = (1..sections.len())
+        .min_by_key(|cut| {
+            let filled: usize = sections[..*cut].iter().map(weight).sum();
+            filled.abs_diff(total - filled)
+        })
+        .unwrap_or(sections.len());
+    let mut sections = sections;
+    let right = sections.split_off(cut);
+    (sections, right)
 }
 
 fn column(sections: &[Section], cx: &App) -> Div {

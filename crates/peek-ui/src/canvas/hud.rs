@@ -78,6 +78,9 @@ pub(super) fn render(view: &CanvasView, cx: &mut Context<CanvasView>) -> impl In
             locked,
         ))
         .child(camera_lock(locked, &focus))
+        // Inline in the cluster, as `RegionsMenu` is inside `ZoomIndicator`: the picker is a
+        // way of moving the camera, so it belongs beside the other ones.
+        .children(regions(view, &focus, cx))
         // Last, so it reads as an annotation on the cluster rather than another control in it.
         .children(view.fps_enabled().then(|| fps(view.fps_reading(), cx)))
 }
@@ -136,6 +139,25 @@ fn rate_color(fps: f64, theme: &PeekTheme) -> Hsla {
     } else {
         theme.red
     }
+}
+
+/// The regions picker's trigger. Absent entirely when the feature is off — a control for
+/// something that cannot happen is worse than no control.
+fn regions(view: &CanvasView, focus: &FocusHandle, cx: &App) -> Option<Button> {
+    if !crate::settings::Settings::get(cx).canvas.enable_regions {
+        return None;
+    }
+    Some(
+        button("regions-menu", IconName::Map)
+            .selected(view.regions_open(cx))
+            .accessibility_label("Regions")
+            .tooltip_with_action(
+                "Regions",
+                &actions::region::OpenPicker,
+                Some(commands::CANVAS),
+            )
+            .on_click(dispatch(Box::new(actions::region::OpenPicker), focus)),
+    )
 }
 
 /// `.zoom-indicator`: a transparent pill behind a half-alpha hairline, with a 1 px gap and 3 px of

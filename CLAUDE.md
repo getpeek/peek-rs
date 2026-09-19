@@ -54,7 +54,11 @@ them (`crates/lsp`, `crates/mcp`, `crates/acp`, `database/`, `ssh_tunnel.rs`, `i
       Left: import, and the Result node's export / context menus / pivot — see docs/status.md)
 - [x] M6 peek-mcp bridge, peek-acp agent node, local Ollama backend
       (the 21 canvas tools live in `peek-canvas::tools` and serve both the MCP bridge and the
-      agent node's own loop; regions gained a mutation API but nothing renders them yet)
+      agent node's own loop)
+- [x] Regions and wayfinding: derived boxes, halos, beacons, edge peekers, the picker in the zoom
+      cluster, the Keep/Rename/Dismiss card over a suggestion, and
+      `Region::{GroupSelection,UngroupSelection,OpenPicker}` + `Settings::ToggleRegions`
+      (left: the two Ollama groupings — see docs/status.md)
 - [ ] M7 peek-multiplayer
 
 # Crate map

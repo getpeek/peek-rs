@@ -21,6 +21,7 @@ use crate::node::draw::{Placement, tessellate};
 use super::convert::to_pixel_bounds;
 use super::edges::{self, EdgeItem};
 use super::frame_stats::Phase;
+use super::wayfinding::halos::{self, Halo};
 use super::{CanvasView, grid, screen_rect};
 
 /// Selection ring: constant screen width and offset regardless of zoom (`node.css`).
@@ -44,6 +45,11 @@ pub(crate) struct NodeItem {
 pub(crate) struct Overlay {
     /// Painted behind every node, so a curve runs under the cards it connects.
     pub edges: Vec<EdgeItem>,
+    /// Region boxes, painted *over* the nodes — see [`super::wayfinding::halos`].
+    pub regions: Vec<Halo>,
+    /// What edges fade to while the beacons carry the canvas. Nodes dim themselves, inside
+    /// their own element tree; a painted curve has no style to inherit one from.
+    pub edge_dim: f32,
     /// Each selected node's rect with the colour its outline is drawn in, which `node.css`
     /// takes from the node's own kind (`--pk-node-type-color`).
     pub selected_rects: Vec<(Rect, Hsla)>,
@@ -221,11 +227,21 @@ impl Element for CanvasElement {
                 window.paint_quad(fill(bounds, gradient));
             }
             grid::paint_dot_grid(bounds, camera, self.overlay.grid_dot, window);
-            edges::paint(bounds, camera, &self.overlay.edges, window);
+            edges::paint(
+                bounds,
+                camera,
+                &self.overlay.edges,
+                self.overlay.edge_dim,
+                window,
+            );
 
             for NodeItem { element, .. } in &mut self.items {
                 window.with_rem_size(Some(rem), |window| element.paint(window, cx));
             }
+
+            // Over the nodes, not under them: a confirmed halo is a veil of the canvas
+            // background, and one painted underneath the cards would do nothing at all.
+            halos::paint(bounds, camera, &self.overlay.regions, window);
 
             for (world, color) in &self.overlay.selected_rects {
                 let screen = offset(screen_rect(camera, *world), bounds.origin);

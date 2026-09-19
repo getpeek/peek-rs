@@ -77,7 +77,8 @@ Implemented ids: `Zoom::{In,Out,Reset,FitView,FitSelection,FitSelectionAndLock}`
 `Page::{SelectPreviousQuery,SelectNextQuery}`,
 `Query::{Focus,Format,Run,RerunAll,RerunSelected}`, `Result::Pivot`,
 `Export::{Csv,Json}`, `View::{ToggleCameraLock,ToggleUi,Organize,Schema}`,
-`Settings::{TogglePageDisplay,ToggleCommandPaletteButton}`, `Help::Keymap`,
+`Region::{GroupSelection,UngroupSelection,OpenPicker}`,
+`Settings::{TogglePageDisplay,ToggleCommandPaletteButton,ToggleRegions}`, `Help::Keymap`,
 `Agent::{Fork,CycleMode,Stop}`, `CommandPalette::Open`, `Theme::Open`,
 `ConnectionPicker::Open`, `App::{About,Quit}`.
 
@@ -87,11 +88,19 @@ stable for a user to bind.
 
 Not implemented, each blocked on a feature rather than on the command:
 `Tool::LassoSelect` (no selection-tool state, no freehand `Interaction`, nothing to paint the
-path), `Region::{GroupSelection,UngroupSelection,OpenPicker}` (regions have a mutation API but
-no renderer), `View::ShowRunningQueries` (the Activity node is still a placeholder), the minimap
-and history-panel toggles, and the collaboration commands. Registering any of them now would put
-a row in the palette that does nothing, which is the failure the `Command`/handler pairing
-exists to prevent.
+path), `Region::{GroupWithAi,RegroupAllWithAi}` (the Ollama grouping is not ported; the regions
+they would fill are),  `View::ShowRunningQueries` (the Activity node is still a placeholder), the
+minimap and history-panel toggles, and the collaboration commands. Registering any of them now
+would put a row in the palette that does nothing, which is the failure the `Command`/handler
+pairing exists to prevent.
+
+`Region::GroupSelection` is the one command whose *label* the registry cannot say properly. The
+reference's row reads `Add 3 nodes to "Churn"`; `label` is `fn(&Scope) -> &'static str` over a
+`Copy` `Scope` of counters — the signature that keeps this registry free of gpui and of the
+document — so a name from the page cannot reach it. `Scope::regions.can_fold` carries the one bit
+that *is* projectable, and the label switches between "Group selection into a region" and "Add
+selection to its region" on it. Which region absorbed the nodes is said by the flash ring
+instead, which is the cue the reference invented for exactly that case.
 
 `ConnectionPicker::Open` is the one command on `WORKSPACE_NOT_TYPING`: bare `p`, handled on
 `WorkspaceView` because switching a connection rebuilds the document, its pages, the rows sidecar
