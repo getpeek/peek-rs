@@ -77,8 +77,9 @@ Implemented ids: `Zoom::{In,Out,Reset,FitView,FitSelection,FitSelectionAndLock}`
 `Page::{SelectPreviousQuery,SelectNextQuery}`,
 `Query::{Focus,Format,Run,RerunAll,RerunSelected}`, `Result::Pivot`,
 `Export::{Csv,Json}`, `View::{ToggleCameraLock,ToggleUi,Organize,Schema}`,
-`Region::{GroupSelection,UngroupSelection,OpenPicker}`,
-`Settings::{TogglePageDisplay,ToggleCommandPaletteButton,ToggleRegions}`, `Help::Keymap`,
+`Region::{GroupSelection,UngroupSelection,OpenPicker,GroupWithAi,RegroupAllWithAi}`,
+`Settings::{TogglePageDisplay,ToggleCommandPaletteButton,ToggleRegions}`,
+`Settings::ToggleAutomaticallyLabelQueries`, `Help::Keymap`,
 `Agent::{Fork,CycleMode,Stop}`, `CommandPalette::Open`, `Theme::Open`,
 `ConnectionPicker::Open`, `App::{About,Quit}`.
 
@@ -86,10 +87,16 @@ Implemented ids: `Zoom::{In,Out,Reset,FitView,FitSelection,FitSelectionAndLock}`
 registry entry and no default key: the palette generates one row per page, and there is nothing
 stable for a user to bind.
 
+Three commands are **conditional on `ai.ollama`**: `Region::{GroupWithAi,RegroupAllWithAi}` and
+`Settings::ToggleAutomaticallyLabelQueries` are absent from the palette when no local model is
+configured, which is what the reference does rather than offering an action that cannot run.
+`Scope::ai` is how the registry knows, and the two groupings ask
+`peek_canvas::regions::grouping::{can_extend,can_partition}` with the counters `RegionScope`
+carries rather than restating the rule that decides whether there is anything to group.
+
 Not implemented, each blocked on a feature rather than on the command:
 `Tool::LassoSelect` (no selection-tool state, no freehand `Interaction`, nothing to paint the
-path), `Region::{GroupWithAi,RegroupAllWithAi}` (the Ollama grouping is not ported; the regions
-they would fill are),  `View::ShowRunningQueries` (the Activity node is still a placeholder), the
+path), `View::ShowRunningQueries` (the Activity node is still a placeholder), the
 minimap and history-panel toggles, and the collaboration commands. Registering any of them now
 would put a row in the palette that does nothing, which is the failure the `Command`/handler
 pairing exists to prevent.

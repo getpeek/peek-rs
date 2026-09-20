@@ -23,14 +23,15 @@ use std::rc::Rc;
 
 use gpui_kit::TestSupportExt;
 use gpui_kit::assets::IconName;
-use gpui_kit::base::input::{Input, InputEvent, InputState};
+use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::Input;
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{Icon, Sizable, StyledExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     App, BoxShadow, ClickEvent, Context, Entity, FocusHandle, FontWeight, Global, KeyDownEvent,
-    SharedString, Subscription, Window, div, point, px, rems,
+    Rems, SharedString, Subscription, Window, div, point, px, rems,
 };
 use peek_config::PageDisplay;
 use peek_document::PageId;
@@ -40,6 +41,10 @@ use crate::canvas::CanvasView;
 use crate::commands::actions;
 use crate::settings::Settings;
 use search::PageRow;
+
+/// How wide a tab is while its name is being typed, between the reference's `min-width: 40px`
+/// and its `max-width: 220px`.
+const RENAME_WIDTH: Rems = Rems(9.0);
 
 /// Whether the pages picker is open.
 ///
@@ -215,16 +220,11 @@ impl PageTabs {
 
     fn tab(&self, row: &PageRow, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.peek_theme();
-        let (fg, dot) = if row.active {
-            (theme.fg, theme.green)
-        } else {
-            (theme.fg_muted, theme.fg_subtle)
-        };
+        let fg = if row.active { theme.fg } else { theme.fg_muted };
         let lit_text = theme.fg;
         let lit_surface = theme.node_bg_2;
         let radius = theme.radius_pill;
         let border = theme.node_border;
-        let glow = theme.green;
 
         let id = row.id.clone();
         let name = row.name.clone();
@@ -246,22 +246,7 @@ impl PageTabs {
             .font_weight(FontWeight::MEDIUM)
             .text_color(fg)
             .hover(move |style| style.bg(lit_surface).text_color(lit_text))
-            .child(
-                div()
-                    .size(rems(0.375))
-                    .flex_shrink_0()
-                    .rounded_full()
-                    .bg(dot)
-                    .when(row.active, move |this| {
-                        this.shadow(vec![BoxShadow {
-                            color: glow,
-                            offset: point(px(0.0), px(0.0)),
-                            blur_radius: px(8.0),
-                            spread_radius: px(0.0),
-                            inset: false,
-                        }])
-                    }),
-            )
+            .child(status_dot(row.active, cx))
             .child(div().min_w_0().truncate().child(name.clone()))
             .when(row.closable, |this| {
                 this.child(close_button(row, &self.canvas_focus))
@@ -279,16 +264,62 @@ impl PageTabs {
             }))
     }
 
-    fn rename_field(rename: &Rename) -> impl IntoElement {
+    /// The tab being renamed: the pill's own chrome around a field, so a rename does not make
+    /// the tab disappear until it commits.
+    ///
+    /// The width is **definite** rather than a maximum, which is the whole of the bug it fixes:
+    /// `InputState` sizes itself from its parent, so a `flex_shrink_0` item whose only width is
+    /// `max_w` measures its content at zero and collapses to its padding. The reference gets
+    /// growth for free from `field-sizing: content` between a 40 px floor and a 220 px ceiling;
+    /// gpui has no such thing, so one width inside that range stands in for all three.
+    fn rename_field(row: &PageRow, rename: &Rename, cx: &App) -> impl IntoElement {
+        let theme = cx.peek_theme();
         div()
             .id("page-rename")
             .test_support()
+            .h_flex()
+            .gap(rems(0.375))
             .px_3()
             .py_1()
-            .max_w(rems(15.0))
+            .w(RENAME_WIDTH)
             .flex_shrink_0()
-            .child(Input::new(&rename.input))
+            .rounded(theme.radius_pill)
+            .border_1()
+            // Tinted, as `.page-tab-editing` tints it: the pill says which tab is being typed in.
+            .border_color(theme.accent_line)
+            .when(row.active, |this| this.bg(theme.node_bg_2))
+            .text_xs()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme.fg)
+            .child(status_dot(row.active, cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Input::new(&rename.input).appearance(false).xsmall()),
+            )
     }
+}
+
+/// The tab's leading dot. Lit and glowing on the active page, dim on the others — and the same
+/// one on a tab being renamed, which is why it is not inlined in `tab`.
+fn status_dot(active: bool, cx: &App) -> impl IntoElement {
+    let theme = cx.peek_theme();
+    let glow = theme.green;
+    div()
+        .size(rems(0.375))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(if active { theme.green } else { theme.fg_subtle })
+        .when(active, move |this| {
+            this.shadow(vec![BoxShadow {
+                color: glow,
+                offset: point(px(0.0), px(0.0)),
+                blur_radius: px(8.0),
+                spread_radius: px(0.0),
+                inset: false,
+            }])
+        })
 }
 
 /// Only on the active tab, and only when another page exists to fall back to — not hover-gated,
@@ -355,7 +386,7 @@ impl PageTabs {
                 if Some(&row.id) == renaming.as_ref()
                     && let Some(rename) = self.rename.as_ref()
                 {
-                    return Self::rename_field(rename).into_any_element();
+                    return Self::rename_field(row, rename, cx).into_any_element();
                 }
                 self.tab(row, cx).into_any_element()
             }))

@@ -13,7 +13,7 @@
 mod execution;
 mod layout;
 mod navigation;
-mod regions;
+pub(super) mod regions;
 mod result;
 mod shell;
 

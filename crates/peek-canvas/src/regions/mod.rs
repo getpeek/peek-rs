@@ -8,6 +8,7 @@
 
 pub mod crossfade;
 pub mod derive;
+pub mod grouping;
 pub mod peeker;
 mod plan;
 
@@ -17,6 +18,7 @@ use crate::history::EditKind;
 use crate::model::Document;
 
 pub use derive::{Derived, REGION_PADDING};
+pub use grouping::{Assignment, GroupingPlan, Prompt};
 pub use plan::GroupPlan;
 
 /// What a caller chooses when grouping; the id and the colour are the document's to assign.
@@ -30,23 +32,9 @@ pub struct NewRegion {
 impl Document {
     /// Groups `members` into a new region on the active page, claiming them from any region
     /// that already holds them.
-    ///
-    /// The colour is the surviving region count modulo the palette, so a page's regions cycle
-    /// through it in creation order.
     pub fn group_nodes(&mut self, members: Vec<NodeId>, region: NewRegion) -> RegionId {
-        let id = RegionId::generate();
         self.begin(EditKind::Structure);
-        let regions = &mut self.active_page_mut().regions;
-        claim(regions, &members, None);
-        let color_index = u8::try_from(regions.len() % REGION_COLOR_COUNT).unwrap_or(0);
-        regions.push(Region {
-            id: id.clone(),
-            name: region.name,
-            desc: region.desc,
-            color_index,
-            status: region.status,
-            member_ids: members,
-        });
+        let id = insert_region(&mut self.active_page_mut().regions, members, region);
         self.touch();
         id
     }
@@ -58,15 +46,7 @@ impl Document {
             return false;
         }
         self.begin(EditKind::Structure);
-        let regions = &mut self.active_page_mut().regions;
-        claim(regions, &members, Some(region));
-        if let Some(target) = regions.iter_mut().find(|candidate| &candidate.id == region) {
-            for member in members {
-                if !target.member_ids.contains(&member) {
-                    target.member_ids.push(member);
-                }
-            }
-        }
+        fold_into(&mut self.active_page_mut().regions, region, members);
         self.touch();
         true
     }
@@ -158,6 +138,38 @@ impl Document {
         self.regions()
             .iter()
             .any(|candidate| &candidate.id == region)
+    }
+}
+
+/// Appends a region holding `members`, claiming them from whatever held them before.
+///
+/// The colour is the surviving region count modulo the palette, so a page's regions cycle
+/// through it in creation order.
+fn insert_region(regions: &mut Vec<Region>, members: Vec<NodeId>, region: NewRegion) -> RegionId {
+    let id = RegionId::generate();
+    claim(regions, &members, None);
+    let color_index = u8::try_from(regions.len() % REGION_COLOR_COUNT).unwrap_or(0);
+    regions.push(Region {
+        id: id.clone(),
+        name: region.name,
+        desc: region.desc,
+        color_index,
+        status: region.status,
+        member_ids: members,
+    });
+    id
+}
+
+/// Adds `members` to `region`, claiming them the same way and leaving its name alone.
+fn fold_into(regions: &mut Vec<Region>, region: &RegionId, members: Vec<NodeId>) {
+    claim(regions, &members, Some(region));
+    let Some(target) = regions.iter_mut().find(|candidate| &candidate.id == region) else {
+        return;
+    };
+    for member in members {
+        if !target.member_ids.contains(&member) {
+            target.member_ids.push(member);
+        }
     }
 }
 

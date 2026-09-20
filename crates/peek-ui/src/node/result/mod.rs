@@ -61,43 +61,18 @@ use super::state::NodeState;
 /// `useResultSearchMatches`'s debounce before a query is matched against every cell.
 const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// The header's own title, `nodeHeading` in `queryHeading.ts`: the whole query on one line, cut
-/// at 60 characters.
-const HEADING_LIMIT: usize = 60;
-
 /// What `ResultNode.tsx` puts in front of the heading, so a result says what it is even when the
 /// query behind it has been scrolled out of the title.
 const TITLE_PREFIX: &str = "result · ";
 
+/// The header's own title, `nodeHeading` in `queryHeading.ts`: the whole query on one line,
+/// cut at 60 characters. The cut itself is [`peek_canvas::describe::heading`], which is what
+/// page search and the AI grouping prompt name a result by too.
 pub(crate) fn title(data: &ResultData) -> String {
-    format!("{TITLE_PREFIX}{}", heading(&data.query))
-}
-
-/// The same cut applied to raw SQL, for callers holding a query rather than a node's data —
-/// page search names a result by the statement behind it.
-///
-/// Every line is joined rather than only the first taken: a query formatted across lines starts
-/// with a bare `SELECT`, and a node titled "SELECT" says nothing about which one it is.
-///
-/// One divergence: `nodeHeading` appends `...` unconditionally, so a one-word query reads
-/// `SELECT 1...`. The ellipsis is only appended here when something was actually cut.
-pub(crate) fn heading(query: &str) -> String {
-    let joined = query
-        .trim_start()
-        .trim_start_matches("--")
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    if joined.is_empty() {
-        return "result".to_string();
-    }
-    if joined.chars().count() <= HEADING_LIMIT {
-        return joined;
-    }
-    let cut: String = joined.chars().take(HEADING_LIMIT).collect();
-    format!("{cut}...")
+    format!(
+        "{TITLE_PREFIX}{}",
+        peek_canvas::describe::heading(&data.query)
+    )
 }
 
 /// `id`, or anything ending `_id`: a column the reference excludes from charting because
@@ -922,61 +897,13 @@ fn empty_state(message: &str, cx: &App) -> AnyElement {
 mod tests {
     use peek_document::ResultData;
 
-    use super::{heading, title};
+    use super::title;
 
     fn data(query: &str) -> ResultData {
         ResultData {
             query: query.to_string(),
             ..ResultData::default()
         }
-    }
-
-    /// `nodeHeading` joins the whole statement onto one line. Taking only the first would title
-    /// every formatted query `SELECT`, which is what the node header used to show.
-    #[test]
-    fn the_heading_joins_a_multi_line_query() {
-        assert_eq!(
-            heading("SELECT\n  DATE_TRUNC('month', s.created_at)\nFROM subscriptions s"),
-            "SELECT DATE_TRUNC('month', s.created_at) FROM subscriptions ..."
-        );
-    }
-
-    #[test]
-    fn the_heading_is_the_query_on_one_line() {
-        assert_eq!(
-            heading("\n\n  select * from users  "),
-            "select * from users"
-        );
-    }
-
-    /// `nodeHeading` strips a leading comment marker, so a documented query is not titled `--`.
-    #[test]
-    fn a_leading_comment_marker_is_stripped() {
-        assert_eq!(heading("-- everyone\nselect 1"), "everyone select 1");
-    }
-
-    #[test]
-    fn a_long_query_is_cut_with_an_ellipsis() {
-        let long = format!("select {}", "x".repeat(100));
-        let heading = heading(&long);
-        assert_eq!(
-            heading.chars().count(),
-            63,
-            "60 characters plus the ellipsis"
-        );
-        assert!(heading.ends_with("..."));
-    }
-
-    #[test]
-    fn an_empty_query_still_has_a_heading() {
-        assert_eq!(heading(""), "result");
-    }
-
-    /// Multi-byte text must be cut on a character boundary, not a byte one.
-    #[test]
-    fn a_long_multibyte_query_does_not_panic() {
-        let long = "é".repeat(200);
-        assert_eq!(heading(&long).chars().count(), 63);
     }
 
     /// The node header says what the node is before it says which query made it.

@@ -37,6 +37,11 @@ pub(super) fn register<E: InteractiveElement>(element: E, cx: &mut Context<Canva
                 toggle_command_palette_button(window, cx);
             },
         )
+        .on_action(
+            |_: &actions::settings::ToggleAutomaticallyLabelQueries, _, cx| {
+                toggle_automatic_query_labels(cx);
+            },
+        )
         .on_action(cx.listener(CanvasView::copy_selected_nodes))
         .on_action(cx.listener(CanvasView::cut_selected_nodes))
         .on_action(cx.listener(CanvasView::paste_nodes))
@@ -66,6 +71,17 @@ fn toggle_command_palette_button(window: &mut Window, cx: &mut App) {
     // `observe_global::<Settings>` on `WorkspaceView` is the narrower one, and `workspace.rs`
     // is not this file.
     window.refresh();
+}
+
+/// Turns AI query naming on or off. Nothing has to be repainted: the next run is what reads
+/// the preference, and a name already written stays.
+fn toggle_automatic_query_labels(cx: &mut App) {
+    let next = !Settings::get(cx).ai.automatically_label_queries;
+    if let Err(error) = Settings::update(cx, |config| {
+        config.ai.automatically_label_queries = next;
+    }) {
+        log::debug!("peek: query label preference not saved: {error}");
+    }
 }
 
 impl CanvasView {

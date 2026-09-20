@@ -25,9 +25,29 @@ const METERED: &str = "region_N6iqZ1js";
 const METERED_MEMBERS: [&str; 2] = ["query_TVz-Cznu", "query_TVz-Cznu-result-0"];
 
 fn open(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<WorkspaceView>) {
+    opened(cx, None)
+}
+
+/// The same window with `ai.ollama` configured. Nothing listens at that address and nothing
+/// here asks it to: what the configuration decides is which controls exist.
+fn open_with_local_model(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<WorkspaceView>) {
+    opened(
+        cx,
+        Some(peek_config::OllamaConfig {
+            model: "nothing-listening".to_string(),
+            url: "http://127.0.0.1:9".to_string(),
+        }),
+    )
+}
+
+fn opened(
+    cx: &mut TestAppContext,
+    ollama: Option<peek_config::OllamaConfig>,
+) -> (WindowHandle<Root>, Entity<WorkspaceView>) {
     cx.update(|cx| {
         let mut config = peek_config::PeekConfig::default();
         config.theme = peek_config::ThemeId::Midday;
+        config.ai.ollama = ollama;
         peek_ui::init(&config, cx);
     });
     let mut workspace = None;
@@ -414,6 +434,55 @@ fn dismissing_a_suggestion_removes_the_region_and_keeps_the_nodes(cx: &mut TestA
 
     assert_eq!(regions(cx, &workspace).len(), before - 1);
     assert_eq!(node_count(cx, &workspace), nodes);
+}
+
+/// Both AI groupings run through the local model, so without one the picker offers neither.
+#[gpui_kit::test]
+fn the_picker_offers_no_ai_grouping_without_a_local_model(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    loosen(cx, &workspace);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.press("r", cx);
+        window.render_frame(cx);
+        assert!(
+            window.try_find("regions-list").is_some(),
+            "the picker is up"
+        );
+        assert!(window.try_find("regions-regroup-all-ai").is_none());
+        assert!(window.try_find("regions-group-ungrouped-ai").is_none());
+    })
+    .unwrap();
+}
+
+/// With one configured, both sparkles appear — and "group ungrouped" only while something is
+/// ungrouped, since there would otherwise be nothing for it to slot anywhere.
+///
+/// What the buttons *do* is not driven from here: the ask runs on `peek-ollama`'s own runtime,
+/// and the gpui test scheduler fails any test whose work lands on a foreign thread. The
+/// grouping itself — prompt, reply, geometric fallback, one undo step — is unit-tested in
+/// `peek_canvas::regions::grouping`.
+#[gpui_kit::test]
+fn the_picker_offers_the_ai_groupings_with_a_local_model(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_with_local_model(cx);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.press("r", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("regions-regroup-all-ai").is_some());
+        assert!(
+            window.try_find("regions-group-ungrouped-ai").is_none(),
+            "every node on this page is already in a region"
+        );
+    })
+    .unwrap();
+
+    loosen(cx, &workspace);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("regions-group-ungrouped-ai").is_some());
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]

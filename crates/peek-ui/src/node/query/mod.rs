@@ -5,6 +5,7 @@
 //! database connection and lands with peek-db; everything else works without one.
 
 mod heading;
+pub(crate) mod label;
 pub(crate) mod language;
 
 use std::cell::{Cell, RefCell};

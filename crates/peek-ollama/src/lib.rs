@@ -14,5 +14,5 @@ mod session;
 mod wire;
 
 pub use chat::{Chat, ChatDelta, ToolCall};
-pub use session::{OllamaError, OllamaSession, Pending, Turn};
+pub use session::{Ask, OllamaError, OllamaSession, Turn};
 pub use wire::{Tool, ToolSchema};

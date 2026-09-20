@@ -1,5 +1,6 @@
 use super::super::{CANVAS_NOT_TYPING, Command, Group, actions, always};
 use peek_canvas::Scope;
+use peek_canvas::regions::grouping;
 
 /// The reference's row reads `Add 3 nodes to "Churn"`. `label` is handed a `Scope` — a `Copy`
 /// struct of counters, which is what keeps this registry free of gpui and of the document — so
@@ -35,6 +36,22 @@ fn regions_enabled(scope: &Scope) -> bool {
     scope.settings.regions_enabled
 }
 
+/// Both AI groupings run through the local model, so they are hidden when `ai.ollama` is not
+/// configured — the reference hides them for the same reason. What each would have to work
+/// with is [`grouping`]'s rule, asked here with the counters `Scope` carries rather than
+/// restated.
+fn can_group_with_ai(scope: &Scope) -> bool {
+    regions_enabled(scope)
+        && scope.ai.local_model
+        && grouping::can_extend(scope.regions.ungrouped, scope.regions.count)
+}
+
+fn can_regroup_all_with_ai(scope: &Scope) -> bool {
+    regions_enabled(scope)
+        && scope.ai.local_model
+        && grouping::can_partition(scope.regions.groupable)
+}
+
 pub(super) static ENTRIES: &[Command] = &[
     Command {
         id: "Region::GroupSelection",
@@ -68,6 +85,28 @@ pub(super) static ENTRIES: &[Command] = &[
         context: CANVAS_NOT_TYPING,
         build: || Box::new(actions::region::OpenPicker),
         available: regions_enabled,
+    },
+    Command {
+        id: "Region::GroupWithAi",
+        title: "Group ungrouped nodes with AI",
+        label: None,
+        group: Group::Region,
+        keywords: "group ai regions cluster organize wayfinding suggest ungrouped",
+        default_keys: &[],
+        context: CANVAS_NOT_TYPING,
+        build: || Box::new(actions::region::GroupWithAi),
+        available: can_group_with_ai,
+    },
+    Command {
+        id: "Region::RegroupAllWithAi",
+        title: "Regroup all nodes with AI",
+        label: None,
+        group: Group::Region,
+        keywords: "regroup reorganize ai regions cluster reshape wayfinding all",
+        default_keys: &[],
+        context: CANVAS_NOT_TYPING,
+        build: || Box::new(actions::region::RegroupAllWithAi),
+        available: can_regroup_all_with_ai,
     },
     Command {
         id: "Settings::ToggleRegions",

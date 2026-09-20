@@ -13,6 +13,7 @@ pub struct Scope {
     pub pages: usize,
     pub history: HistoryScope,
     pub regions: RegionScope,
+    pub ai: AiScope,
     pub camera_locked: bool,
     pub chrome_hidden: bool,
     pub connected: bool,
@@ -35,6 +36,22 @@ pub struct RegionScope {
     pub can_fold: bool,
     /// Some selected node sits in a region, so there is something to pull out.
     pub can_ungroup: bool,
+    /// Nodes on the active page that no region holds, drawings excluded — what "group
+    /// ungrouped with AI" would have to work with.
+    pub ungrouped: usize,
+    /// Nodes a grouping may touch at all, which is every node but the drawings.
+    pub groupable: usize,
+}
+
+/// What `settings.json` says about the local model. The AI commands are offered only when one
+/// is configured, and a toggle names what pressing it does — both of which the registry has to
+/// know without reading the disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AiScope {
+    /// `ai.ollama` is set, so there is something local to ask.
+    pub local_model: bool,
+    /// `ai.automatically_label_queries`.
+    pub labels_queries: bool,
 }
 
 /// The slice of `settings.json` the palette's labels read. Kept in its own struct, like

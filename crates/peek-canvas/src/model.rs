@@ -864,6 +864,8 @@ impl Document {
                     can_group: plan != GroupPlan::Unavailable,
                     can_fold: matches!(plan, GroupPlan::FoldInto(_)),
                     can_ungroup: !self.grouped_selection().is_empty(),
+                    ungrouped: self.ungrouped_count(),
+                    groupable: self.groupable_count(),
                 }
             },
             ..Scope::default()

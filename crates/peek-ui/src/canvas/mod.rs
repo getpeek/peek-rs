@@ -121,6 +121,9 @@ pub(crate) struct CanvasView {
     /// The Keep / Rename / Dismiss cards over suggested regions. Its own entity for the same
     /// reason the picker is: it owns a rename field, and a field needs focus.
     suggestions: Entity<wayfinding::card::SuggestionCards>,
+    /// The AI grouping in flight, or `None`. Held here rather than in the picker because the
+    /// palette can start one with the picker closed, and dropping it cancels the request.
+    grouping: Option<dispatch::regions::GroupingRun>,
 }
 
 impl std::fmt::Debug for CanvasView {
@@ -182,6 +185,7 @@ impl CanvasView {
             wayfinding: wayfinding::Wayfinding::default(),
             regions,
             suggestions,
+            grouping: None,
         }
     }
 
@@ -350,6 +354,10 @@ impl CanvasView {
                 palette_button_hidden: settings.ui.titlebar.command_palette_button
                     == peek_config::Visibility::Hide,
                 regions_enabled: settings.canvas.enable_regions,
+            },
+            ai: peek_canvas::AiScope {
+                local_model: settings.ai.ollama.is_some(),
+                labels_queries: settings.ai.automatically_label_queries,
             },
             ..self.document.read(cx).scope()
         }

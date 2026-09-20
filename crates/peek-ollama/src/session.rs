@@ -10,7 +10,13 @@ use crate::wire::{ChatChunk, ChatRequest, Options};
 const KEEP_ALIVE: &str = "10m";
 const NUM_THREAD: u32 = 32;
 
-pub type Pending<T> = oneshot::Receiver<Result<T, OllamaError>>;
+/// How long a one-shot ask may take before it is given up on — `GROUPING_TIMEOUT_MS` in
+/// `useAiGrouping.ts`.
+///
+/// The reference caps grouping and nothing else, so a label request against a model that never
+/// answers hangs for as long as the app is open. One cap for every ask costs nothing and means
+/// no caller has to remember to add one.
+const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OllamaError {
@@ -44,6 +50,35 @@ impl Turn {
     /// The next piece of the turn, or `None` once it has ended.
     pub async fn next(&mut self) -> Option<ChatDelta> {
         self.deltas.recv().await
+    }
+}
+
+/// A one-shot ask in flight. Await it for the answer; drop it to cancel the request, exactly
+/// as dropping a [`Turn`] does.
+#[derive(Debug)]
+pub struct Ask {
+    answer: oneshot::Receiver<Result<String, OllamaError>>,
+    _abort: AbortOnDrop,
+}
+
+impl std::future::Future for Ask {
+    type Output = Result<String, OllamaError>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        // The sender is only dropped without sending when the runtime is going away, which is
+        // an error to the caller like any other — flattened here so no caller unwraps twice.
+        std::pin::Pin::new(&mut self.get_mut().answer)
+            .poll(context)
+            .map(|received| {
+                received.unwrap_or_else(|_| {
+                    Err(OllamaError::Request(
+                        "the model runtime stopped".to_string(),
+                    ))
+                })
+            })
     }
 }
 
@@ -98,21 +133,33 @@ impl OllamaSession {
         &self.model
     }
 
+    /// Asks once and waits for the whole answer.
+    ///
+    /// For the callers that want a value rather than a conversation — a region grouping, a query
+    /// label — where a half-written reply is of no use and streaming only adds a partial state
+    /// to handle. Capped at [`ASK_TIMEOUT`]; dropping the receiver cancels the request.
+    #[must_use]
+    pub fn ask(&self, chat: Chat) -> Ask {
+        let (sender, answer) = oneshot::channel();
+        let request = self.request(chat, false);
+        let client = self.client.clone();
+        let endpoint = format!("{}/api/chat", self.url);
+
+        let handle = self.runtime.spawn(async move {
+            // The receiver going away means the caller stopped caring, which is not an error.
+            let _ = sender.send(complete(&client, &endpoint, &request).await);
+        });
+        Ask {
+            answer,
+            _abort: AbortOnDrop(handle),
+        }
+    }
+
     /// Starts a turn. Every token arrives on the returned [`Turn`]; dropping it cancels.
     #[must_use]
     pub fn chat(&self, chat: Chat) -> Turn {
         let (sender, deltas) = mpsc::unbounded_channel();
-        let request = ChatRequest {
-            model: self.model.clone(),
-            messages: chat.messages,
-            tools: chat.tools,
-            stream: true,
-            keep_alive: KEEP_ALIVE,
-            think: false,
-            options: Options {
-                num_thread: NUM_THREAD,
-            },
-        };
+        let request = self.request(chat, true);
         let client = self.client.clone();
         let endpoint = format!("{}/api/chat", self.url);
 
@@ -129,6 +176,60 @@ impl OllamaSession {
             _abort: AbortOnDrop(handle),
         }
     }
+
+    fn request(&self, chat: Chat, stream: bool) -> ChatRequest {
+        ChatRequest {
+            model: self.model.clone(),
+            messages: chat.messages,
+            tools: chat.tools,
+            stream,
+            keep_alive: KEEP_ALIVE,
+            think: false,
+            options: Options {
+                num_thread: NUM_THREAD,
+            },
+        }
+    }
+}
+
+/// One unstreamed request: the server answers with a single JSON object rather than NDJSON.
+async fn complete(
+    client: &reqwest::Client,
+    endpoint: &str,
+    request: &ChatRequest,
+) -> Result<String, OllamaError> {
+    let response = client
+        .post(endpoint)
+        .timeout(ASK_TIMEOUT)
+        .json(request)
+        .send()
+        .await
+        .map_err(|error| OllamaError::Request(error.to_string()))?;
+    let response = success(response).await?;
+
+    let body = response
+        .text()
+        .await
+        .map_err(|error| OllamaError::Stream(error.to_string()))?;
+    let chunk: ChatChunk = serde_json::from_str(&body)
+        .map_err(|error| OllamaError::Stream(format!("unreadable answer: {error}")))?;
+    Ok(chunk
+        .message
+        .map(|message| message.content)
+        .unwrap_or_default())
+}
+
+/// A status the server refused with, as the error the caller shows.
+async fn success(response: reqwest::Response) -> Result<reqwest::Response, OllamaError> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    Err(OllamaError::Request(format!(
+        "the model server answered {status}: {}",
+        body.trim()
+    )))
 }
 
 /// Reads the NDJSON body a line at a time, forwarding each token as it lands.
@@ -145,16 +246,7 @@ async fn stream(
         .await
         .map_err(|error| OllamaError::Request(error.to_string()))?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(OllamaError::Request(format!(
-            "the model server answered {status}: {}",
-            body.trim()
-        )));
-    }
-
-    let mut response = response;
+    let mut response = success(response).await?;
     let mut answer = String::new();
     let mut calls: Vec<ToolCall> = Vec::new();
     // A chunk boundary can split a line, so whatever is left over is carried forward.

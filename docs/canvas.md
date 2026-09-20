@@ -470,6 +470,38 @@ are called from inside a `CanvasView` listener, where that entity is leased — 
 the canvas back. The cursor is moved to the renaming row in `render` instead, and focus is handed
 back through a `restore_focus` handle captured on open rather than by asking the canvas for one.
 
+The panel's two sparkle buttons — one on the header, one on the `Ungrouped` row — dispatch
+`Region::RegroupAllWithAi` and `Region::GroupWithAi` through the canvas focus handle, so a
+button, a palette row and a future keybinding are all the same command. They exist only when
+`ai.ollama` is configured.
+
+### Letting the model group
+
+`peek_canvas::regions::grouping`, the port of `useAiGrouping.ts`, `useGroupWithAi.ts`,
+`useRegroupAllWithAi.ts` and `clusterUngrouped.ts`. **The model decides the grouping, not just
+the names.** A `Prompt` is built from the page — numbered node lines (`[3] query [120,-40]
+Active users — select …`), the edges between them, and, for the living-document variant, the
+existing regions as `[R#]` anchors — the caller sends it wherever it likes, and `parse` turns
+the reply back into a `GroupingPlan`. Both system prompts are the reference's verbatim: the two
+apps read the same documents, so the same page should come back grouped the same way.
+
+The two commands differ only in what the prompt asks and what the plan does with the answer.
+`Prompt::extend` shows the model the ungrouped nodes and the regions they could join, and its
+plan *adds*; `Prompt::partition` shows it everything, and its plan *replaces*. Which one a plan
+is cannot be chosen by a caller — the field is private, set by the prompt that produced it.
+
+Everything here is pure, and the whole plan lands through `Document::apply_grouping` in one
+transaction: a grouping is reviewed as a whole, so undoing it is one ⌘Z however many regions it
+touched. Every region it creates is `Suggested`, which is what the Keep / Rename / Dismiss card
+over each one is for.
+
+A model that cannot be reached, or that answers with prose, is **not** an error:
+`Prompt::fallback` clusters the same nodes geometrically — union-find over the edges between
+them plus a 420 px proximity radius — and names the clusters `Group N`. The reference falls back
+the same way, and it is why the feature degrades to something useful rather than to nothing.
+The describing half is shared with page search (`peek_canvas::describe`), so a node kind is
+described once for both, and a query labelled by the model reaches the prompt as its title.
+
 ## Keyboard navigation
 
 Three ways to move between nodes without the mouse, all ported from the reference. The maths and

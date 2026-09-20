@@ -134,6 +134,9 @@ pub(crate) fn run(
                 document.update_data::<QueryData>(&node, |data| data.is_running = Some(false));
                 cx.notify();
             });
+            // A run is what the reference labels on too, error or not: a statement worth
+            // running is worth naming, and the name is of the query rather than its rows.
+            crate::node::query::label::after_run(&document, &node, cx);
         });
     })
     .detach();

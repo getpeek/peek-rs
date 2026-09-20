@@ -114,10 +114,21 @@ pub mod view {
 }
 
 /// Region commands. `GroupSelection` and `UngroupSelection` act on the selection;
-/// `OpenPicker` raises the regions menu in the zoom cluster.
+/// `OpenPicker` raises the regions menu in the zoom cluster. The two AI groupings ask the
+/// local model to organize the page — `GroupWithAi` only the nodes no region holds,
+/// `RegroupAllWithAi` every one of them.
 pub mod region {
     use super::actions;
-    actions!(Region, [GroupSelection, UngroupSelection, OpenPicker]);
+    actions!(
+        Region,
+        [
+            GroupSelection,
+            UngroupSelection,
+            OpenPicker,
+            GroupWithAi,
+            RegroupAllWithAi
+        ]
+    );
 }
 
 pub mod export {
@@ -129,7 +140,12 @@ pub mod settings {
     use super::actions;
     actions!(
         Settings,
-        [ToggleCommandPaletteButton, TogglePageDisplay, ToggleRegions]
+        [
+            ToggleCommandPaletteButton,
+            TogglePageDisplay,
+            ToggleRegions,
+            ToggleAutomaticallyLabelQueries
+        ]
     );
 }
 

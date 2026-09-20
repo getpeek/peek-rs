@@ -13,10 +13,12 @@ use gpui_kit::TestSupportExt;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::{Icon, StyledExt};
+use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{Icon, Sizable, StyledExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, App, BoxShadow, Context, Entity, FocusHandle, FontWeight, KeyDownEvent,
+    Action, AnyElement, App, BoxShadow, Context, Entity, FocusHandle, FontWeight, KeyDownEvent,
     MouseButton, MouseDownEvent, Pixels, ScrollHandle, SharedString, Subscription, WeakEntity,
     Window, div, point, px, transparent_black,
 };
@@ -24,6 +26,8 @@ use peek_document::{RegionId, RegionStatus};
 use peek_theme::ActivePeekTheme;
 
 use crate::canvas::CanvasView;
+use crate::canvas::dispatch::regions::Grouping;
+use crate::commands::actions;
 
 /// `.wf-region-list`'s width.
 const WIDTH: Pixels = px(280.0);
@@ -33,6 +37,17 @@ const MAX_HEIGHT: Pixels = px(320.0);
 const LEFT: Pixels = px(16.0);
 const BOTTOM: Pixels = px(62.0);
 const DOT: Pixels = px(8.0);
+
+/// What the two sparkle buttons can do this frame. `None` when no local model is configured,
+/// which is when the reference hides them rather than offering an action that cannot run.
+struct Ai {
+    /// The canvas's handle, because a button dispatches the same action the palette does.
+    focus: FocusHandle,
+    can_group_ungrouped: bool,
+    can_regroup_all: bool,
+    /// The grouping already in flight, if any: its button spins and the other is inert.
+    running: Option<Grouping>,
+}
 
 /// One row, resolved against the live nodes so a count means what the canvas shows.
 struct Row {
@@ -233,24 +248,31 @@ impl RegionsPanel {
 
     /// Nodes on the page that no region holds, as the reference's trailing row counts them.
     /// Drawings are annotation rather than content, so they are never "ungrouped work" —
-    /// `list_regions` already draws that line.
+    /// `list_regions` and the AI grouping draw the same line.
     fn ungrouped(&self, cx: &App) -> usize {
         let Some(canvas) = self.canvas.upgrade() else {
             return 0;
         };
+        canvas.read(cx).document().read(cx).ungrouped_count()
+    }
+
+    /// What the AI buttons can do, or `None` without a local model to ask.
+    fn ai(&self, cx: &App) -> Option<Ai> {
+        let canvas = self.canvas.upgrade()?;
         let canvas = canvas.read(cx);
-        let document = canvas.document().read(cx);
-        document
-            .nodes()
-            .iter()
-            .filter(|node| !matches!(node.kind, peek_document::NodeKind::Draw(_)))
-            .filter(|node| {
-                !document
-                    .regions()
-                    .iter()
-                    .any(|region| region.member_ids.contains(&node.id))
-            })
-            .count()
+        let scope = canvas.scope(cx);
+        if !scope.ai.local_model {
+            return None;
+        }
+        Some(Ai {
+            focus: canvas.focus_handle.clone(),
+            can_group_ungrouped: peek_canvas::regions::grouping::can_extend(
+                scope.regions.ungrouped,
+                scope.regions.count,
+            ),
+            can_regroup_all: peek_canvas::regions::grouping::can_partition(scope.regions.groupable),
+            running: canvas.grouping(),
+        })
     }
 
     fn step(&mut self, step: isize, cx: &mut Context<Self>) {
@@ -302,6 +324,7 @@ impl Render for RegionsPanel {
         }
         let rows = self.rows(cx);
         let ungrouped = self.ungrouped(cx);
+        let ai = self.ai(cx);
         // The cursor follows the row being renamed, which is what opening straight into rename
         // mode could not set for itself.
         if let Some(renaming) = &self.renaming
@@ -311,13 +334,21 @@ impl Render for RegionsPanel {
         }
         layer
             .child(scrim(cx))
-            .child(self.panel(&rows, ungrouped, cx))
+            .child(self.panel(&rows, (ungrouped, ai.as_ref()), cx))
             .on_key_down(cx.listener(Self::on_key_down))
     }
 }
 
 impl RegionsPanel {
-    fn panel(&self, rows: &[Row], ungrouped: usize, cx: &mut Context<Self>) -> impl IntoElement {
+    /// `ungrouped` carries the count and the AI state together: both belong to the trailing
+    /// row, and a fourth parameter would be one too many.
+    fn panel(
+        &self,
+        rows: &[Row],
+        ungrouped: (usize, Option<&Ai>),
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let (count, ai) = ungrouped;
         let theme = cx.peek_theme().clone();
         div()
             .id("regions-list")
@@ -343,14 +374,18 @@ impl RegionsPanel {
                     inset: false,
                 }])
             })
-            .child(Self::title(cx))
+            .child(Self::title(ai, cx))
             .child(self.list(rows, cx))
-            .children((ungrouped > 0).then(|| Self::ungrouped_row(ungrouped, cx)))
+            .children((count > 0).then(|| Self::ungrouped_row((count, ai), cx)))
     }
 
-    fn title(cx: &App) -> impl IntoElement {
+    /// The header, with "regroup all with AI" hung off it — it reshapes the whole list below
+    /// rather than any one row, which is why the reference puts it here.
+    fn title(ai: Option<&Ai>, cx: &App) -> impl IntoElement {
         let theme = cx.peek_theme();
         div()
+            .h_flex()
+            .items_center()
             .px(px(14.0))
             .pt(px(10.0))
             .pb(px(6.0))
@@ -358,7 +393,15 @@ impl RegionsPanel {
             .font_family("Monaspace Krypton")
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme.fg_subtle)
-            .child("REGIONS")
+            .child(div().flex_1().child("REGIONS"))
+            .children(ai.filter(|ai| ai.can_regroup_all).map(|ai| {
+                sparkle(
+                    "regions-regroup-all-ai",
+                    "Regroup all with AI",
+                    (Grouping::All, ai),
+                    cx,
+                )
+            }))
     }
 
     fn list(&self, rows: &[Row], cx: &mut Context<Self>) -> impl IntoElement {
@@ -483,8 +526,10 @@ impl RegionsPanel {
     }
 
     /// The reference's trailing row: what is *not* in a region, so the page's blind spot is
-    /// visible from the same list its regions are.
-    fn ungrouped_row(count: usize, cx: &App) -> impl IntoElement {
+    /// visible from the same list its regions are — with the button that asks the model to
+    /// clear it.
+    fn ungrouped_row(ungrouped: (usize, Option<&Ai>), cx: &App) -> impl IntoElement {
+        let (count, ai) = ungrouped;
         let theme = cx.peek_theme();
         div()
             .id("region-row-ungrouped")
@@ -513,7 +558,73 @@ impl RegionsPanel {
                     .text_color(theme.fg_subtle)
                     .child(count.to_string()),
             )
+            .children(ai.filter(|ai| ai.can_group_ungrouped).map(|ai| {
+                sparkle(
+                    "regions-group-ungrouped-ai",
+                    "Group ungrouped with AI (slots into existing or creates new)",
+                    (Grouping::Ungrouped, ai),
+                    cx,
+                )
+            }))
     }
+}
+
+/// One AI button: a sparkle that dispatches its command, or a spinner while it is running.
+///
+/// Nothing is dispatched while either grouping is in flight. A second ask would race the first
+/// over the same regions, and the model is usually the slowest thing in the app.
+fn sparkle(
+    id: &'static str,
+    label: &'static str,
+    grouping: (Grouping, &Ai),
+    cx: &App,
+) -> AnyElement {
+    let (grouping, ai) = grouping;
+    let theme = cx.peek_theme();
+    let button = div()
+        .id(id)
+        .test_support()
+        .aria_label(label)
+        .size(px(20.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .rounded(px(4.0))
+        .text_color(theme.fg_subtle);
+
+    if ai.running == Some(grouping) {
+        return button
+            .child(Spinner::new().xsmall().color(theme.accent))
+            .into_any_element();
+    }
+    if ai.running.is_some() {
+        return button.opacity(0.4).child(icon()).into_any_element();
+    }
+
+    let action: Box<dyn Action> = match grouping {
+        Grouping::Ungrouped => Box::new(actions::region::GroupWithAi),
+        Grouping::All => Box::new(actions::region::RegroupAllWithAi),
+    };
+    let focus = ai.focus.clone();
+    let tooltip: Box<dyn Action> = action.boxed_clone();
+    button
+        .cursor_pointer()
+        .tooltip(move |window, cx| {
+            Tooltip::new(label)
+                .action(tooltip.as_ref(), Some(crate::commands::CANVAS))
+                .build(window, cx)
+        })
+        .child(icon())
+        .on_click(move |_, window, cx| {
+            focus.dispatch_action(&*action, window, cx);
+            cx.stop_propagation();
+        })
+        .into_any_element()
+}
+
+fn icon() -> Icon {
+    Icon::new(IconName::Sparkles).size(px(12.0))
 }
 
 fn suggested_badge(cx: &App) -> impl IntoElement {

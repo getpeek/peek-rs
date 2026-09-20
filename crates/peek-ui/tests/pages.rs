@@ -211,6 +211,31 @@ fn double_click_renames_a_page(cx: &mut TestAppContext) {
     .unwrap();
 }
 
+/// The tab must stay a tab while it is being renamed. It regressed into an invisible sliver:
+/// the editing element carried a `max_w` and no width of its own, and an `InputState` measures
+/// its content at zero, so the flex item collapsed to its padding until enter restored the pill.
+#[gpui_kit::test]
+fn a_tab_being_renamed_keeps_the_width_of_a_tab(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let target = active(cx, &workspace);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        let before = window.find(tab(&target)).bounds();
+        window.double_click(tab(&target), cx);
+        window.render_frame(cx);
+
+        let editing = window.find("page-rename").bounds();
+        assert!(
+            editing.size.width > before.size.width / 2.0,
+            "the editing tab is {:?} wide against the pill's {:?}",
+            editing.size.width,
+            before.size.width
+        );
+        assert!(editing.size.height >= before.size.height);
+    })
+    .unwrap();
+}
+
 #[gpui_kit::test]
 fn escape_cancels_a_rename_and_hands_focus_back(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);

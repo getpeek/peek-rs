@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-09-18.
+Last updated: 2026-09-20.
 
 ## Milestones
 
@@ -14,9 +14,9 @@ Last updated: 2026-09-18.
 | M6 | peek-mcp bridge over the mutation API, peek-acp agent node, local Ollama backend | Done |
 | M7 | peek-multiplayer with an event-sink trait replacing Tauri's `AppHandle` | Not started |
 
-Regions and wayfinding are **in** — see below. Canvas features that slot in between milestones
-and are still not started: the minimap, the history panel, the Activity node's running-query
-list, and the two Ollama groupings behind the regions picker.
+Regions and wayfinding are **in**, the two Ollama groupings with them — see below. Canvas
+features that slot in between milestones and are still not started: the minimap, the history
+panel, and the Activity node's running-query list.
 
 ## The command palette port
 
@@ -83,9 +83,13 @@ Two honest gaps in the batch's own testing, recorded rather than papered over:
 The region commands landed with the renderer: `Region::{GroupSelection,UngroupSelection,
 OpenPicker}` on the reference's own `meta-g` / `meta-shift-g` / `r`, plus `Settings::ToggleRegions`.
 
-Not ported, each blocked on a feature rather than on the command: the two AI groupings, the
-minimap toggle, "Show running queries", "Show history", host/join session, automatic query
-labels, and `Tool::LassoSelect` — which is a freehand selection tool, not a command. Registering
+The three local-model commands landed with the groupings: `Region::{GroupWithAi,
+RegroupAllWithAi}` and `Settings::ToggleAutomaticallyLabelQueries`, each absent from the palette
+without an `ai.ollama` block to run it.
+
+Not ported, each blocked on a feature rather than on the command: the
+minimap toggle, "Show running queries", "Show history", host/join session,
+and `Tool::LassoSelect` — which is a freehand selection tool, not a command. Registering
 any of them would put a row in the palette that does nothing.
 
 ### M5, in pieces
@@ -511,7 +515,7 @@ model.
 
 ### Regions and wayfinding
 
-The port of `~/labs/peek/src/canvas/wayfinding/`, minus the two Ollama groupings. See
+The port of `~/labs/peek/src/canvas/wayfinding/`, the two Ollama groupings included. See
 `docs/canvas.md`, "Regions and wayfinding", for how it works; what follows is what shipped and
 what it cost.
 
@@ -553,9 +557,36 @@ region's last node left a record for a label over nothing, which would then have
 back to the shared document. `Document::remove` now prunes inside the transaction it already
 opened, so the node and its region go in one undo step.
 
-Covered by ~30 unit tests in `peek-canvas/src/regions/` and 16 `#[gpui_kit::test]`s in
+Covered by ~45 unit tests in `peek-canvas/src/regions/` and 18 `#[gpui_kit::test]`s in
 `crates/peek-ui/tests/regions.rs` driving real key and pointer dispatch against the three real
 regions in the `plock-local` fixture.
+
+#### The two Ollama groupings
+
+In: `Region::{GroupWithAi,RegroupAllWithAi}`, the reference's two system prompts verbatim, the
+reply parser, the geometric fallback (`clusterUngrouped`: union-find over edges plus a 420 px
+proximity radius), and the picker's two sparkle buttons — one on the header, one on the
+`Ungrouped` row — which spin while a grouping runs. Nothing is offered without an `ai.ollama`
+block. See `docs/canvas.md`, "Letting the model group".
+
+Three decisions the reference did not have to make:
+
+- **The prompt and the parser are pure, in `peek-canvas`.** The reference builds both inside a
+  React hook holding a `ChatOllama`; here `Prompt` is a value and the caller does the asking,
+  which is what lets the interesting half — numbering, claiming, the fallback — be unit-tested
+  without a model.
+- **A whole grouping is one undo step.** `Document::apply_grouping` applies every assignment in
+  one transaction, where the reference writes region state per group. Structural edits never
+  coalesce here, so without it accepting a five-region answer would have cost five ⌘Zs.
+- **Node descriptions are shared with page search.** `describeNode` lives in the search corpus
+  in both apps; the port had put it in `peek-ui`, so it moved to `peek_canvas::describe` rather
+  than being written a second time for the prompt. `peek_canvas::describe::heading` came with
+  it, which is also what the Result node titles itself by.
+
+Not covered by a UI test: what the buttons *do*. The ask runs on `peek-ollama`'s own tokio
+runtime, and the gpui test scheduler fails any test whose work lands on a foreign thread — so
+`crates/peek-ui/tests/regions.rs` asserts which controls exist, and the grouping itself is
+tested in `peek_canvas::regions::grouping`.
 
 ### Keyboard navigation
 
@@ -870,10 +901,18 @@ listeners, the HUD and the toolbar are rebuilt every frame, which is cheap next 
   places a node, and an unknown id comes back as the reference's own error string. The drain holds
   the workspace, not its canvas, so switching connection moves the agent to the new document
   rather than leaving it editing an orphaned one.
-- **Regions are drawn, reachable and editable.** See "Regions and wayfinding" above. What is
-  *not* ported is the Ollama grouping — `Region::{GroupWithAi,RegroupAllWithAi}` and the
-  `clusterUngrouped` fallback behind them — so `RegionStatus::Suggested` only ever arrives from
-  an MCP agent's `group_nodes`, which is what the review card exists for.
+- **Regions are drawn, reachable and editable, and a local model can organize them.** See
+  "Regions and wayfinding" above. `RegionStatus::Suggested` now arrives from three places — an
+  MCP agent's `group_nodes`, the model's own answer, and the geometric clustering behind it —
+  all reviewed through the same Keep / Rename / Dismiss card.
+- **A finished query can name itself.** With `ai.automatically_label_queries` on and a local
+  model configured, a run that ends against an unnamed query asks for a title and writes it to
+  `description`, which the node header, page search and the grouping prompt all read.
+  `Settings::ToggleAutomaticallyLabelQueries` flips it from the palette. The ask hangs off the
+  end of the run rather than off `isRunning` changing: the reference's effect is torn down by
+  every live-poll tick, so it has to remember in a ref that it already asked, and that memo is
+  a gpui global here (`node/query/label.rs`) for the same reason — a live query must not ask a
+  model for a name every ten seconds.
 - **The ACP session opens on the first prompt, not on mount.** The reference opens eagerly so the
   mode pill and the MCP warning are ready before the first question; here the pill appears after
   the first turn. Opening four sessions when a document loads seemed the worse trade.
@@ -927,6 +966,11 @@ listeners, the HUD and the toolbar are rebuilt every frame, which is cheap next 
   types `)` elsewhere would need gpui's `key_equivalents`, which Peek does not use yet.
 - Mouse-wheel (non-trackpad) viewport commits use a 140 ms quiet-period timer.
 - The title bar carries the page tabs and the connection picker; no collaborate button yet.
+- **A tab being renamed keeps the pill it was.** It used to collapse to its padding and read as
+  gone until enter: `max_w` is a maximum, and an `InputState` sizes itself from its parent, so a
+  `flex_shrink_0` item with no width of its own measures at zero. The editing tab now carries a
+  definite width and the tab's own border, dot and type scale, as `.page-tab-editing` does — a
+  regression a test can hold, since the width is assertable where "looks wrong" is not.
 - **`--fps` puts a frame-rate readout in the zoom cluster**, as a segment after the camera lock.
   It is **passive**: it counts frames gpui actually drew over a rolling second and reads `idle`
   when nothing is moving, because gpui redraws on demand and a still canvas draws nothing at all —

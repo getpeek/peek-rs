@@ -19,6 +19,20 @@ fn palette_button_label(scope: &Scope) -> &'static str {
     }
 }
 
+fn query_labels_label(scope: &Scope) -> &'static str {
+    if scope.ai.labels_queries {
+        "Disable automatic query labels"
+    } else {
+        "Enable automatic query labels"
+    }
+}
+
+/// Labelling asks the local model for a title, so there is no point offering the toggle
+/// without one — the reference hides it on the same condition.
+fn has_local_model(scope: &Scope) -> bool {
+    scope.ai.local_model
+}
+
 pub(super) static ENTRIES: &[Command] = &[
     Command {
         id: "Settings::ToggleCommandPaletteButton",
@@ -43,5 +57,17 @@ pub(super) static ENTRIES: &[Command] = &[
         context: WORKSPACE,
         build: || Box::new(actions::settings::TogglePageDisplay),
         available: always,
+    },
+    Command {
+        id: "Settings::ToggleAutomaticallyLabelQueries",
+        // The stable name, for the keymap modal and tooltips; the palette shows `label`.
+        title: "Enable or disable automatic query labels",
+        label: Some(query_labels_label),
+        group: Group::Settings,
+        keywords: "ai automatically label queries description title name toggle setting",
+        default_keys: &[],
+        context: WORKSPACE,
+        build: || Box::new(actions::settings::ToggleAutomaticallyLabelQueries),
+        available: has_local_model,
     },
 ];

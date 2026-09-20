@@ -58,7 +58,10 @@ them (`crates/lsp`, `crates/mcp`, `crates/acp`, `database/`, `ssh_tunnel.rs`, `i
 - [x] Regions and wayfinding: derived boxes, halos, beacons, edge peekers, the picker in the zoom
       cluster, the Keep/Rename/Dismiss card over a suggestion, and
       `Region::{GroupSelection,UngroupSelection,OpenPicker}` + `Settings::ToggleRegions`
-      (left: the two Ollama groupings — see docs/status.md)
+- [x] Local AI: the two Ollama groupings (`Region::{GroupWithAi,RegroupAllWithAi}`, prompts and
+      geometric fallback in `peek-canvas::regions::grouping`) and automatic query labels
+      (`Settings::ToggleAutomaticallyLabelQueries`). Export filenames stay the SQL slug — see
+      docs/status.md
 - [ ] M7 peek-multiplayer
 
 # Crate map

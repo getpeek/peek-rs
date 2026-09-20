@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod camera;
+pub mod describe;
 pub mod direction;
 pub mod edge;
 pub mod execution;
@@ -23,6 +24,7 @@ pub mod stroke;
 pub mod tools;
 
 pub use camera::{Camera, MAX_ZOOM, MIN_ZOOM};
+pub use describe::{Described, describe};
 pub use direction::Direction;
 pub use flight::{CameraFlight, Easing};
 pub use jump::{JumpMode, JumpTarget, Pressed};
@@ -32,5 +34,5 @@ pub use model::{DRAW_COLOR, DRAW_STROKE_WIDTH, Document};
 pub use peek_document::geometry::{Point, Rect, Size};
 pub use regions::{Derived, GroupPlan, NewRegion, REGION_PADDING};
 pub use render_scale::render_scale;
-pub use scope::{HistoryScope, RegionScope, Scope, SettingsScope};
+pub use scope::{AiScope, HistoryScope, RegionScope, Scope, SettingsScope};
 pub use tools::{CameraMove, ToolCall, ToolOutcome, execute};
