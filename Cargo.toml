@@ -89,6 +89,10 @@ reqwest = { version = "0.12", default-features = false, features = [
   "stream",
   "rustls-tls",
 ] }
+# The Dock icon: gpui exposes no way to set it, so `peek-ui` talks to AppKit directly.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.3", features = ["NSData"] }
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

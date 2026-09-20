@@ -8,7 +8,7 @@ Last updated: 2026-09-18.
 |---|---|---|
 | M1 | Load a real document, placeholder node shells, pan / zoom / camera flights, keymap + command palette | Done (headless tests green; user feel-test pending) |
 | M2 | Node shell: selection rings, click / shift / marquee selection, drag, entry animation | Done except the entry animation: nodes are hit-tested by region (header / body / resize); the header drags, the body selects without dragging unless cmd is held (which drags from anywhere on the card), and the edges and corners resize within a screen-constant grab band |
-| M3 | Themes: six Peek themes, gpui-component projection, picker with live preview | Done (syntax colours, picker swatches, dock icon deferred) |
+| M3 | Themes: six Peek themes, gpui-component projection, picker with live preview | Done (syntax colours, picker swatches; the Dock icon is the dark one at startup, not swapped per theme) |
 | M4 | First real nodes, document mutations, undo, autosave; flip persistence to read-write | Done for seven kinds (Text, Variable, Draw, BarChart, TableDefinition, QueryError and now Query) plus the foundation: mutation API, per-page undo, debounced autosave, `--write` flag, per-kind body seam |
 | M5 | peek-db: connections, SSH tunnels, results sidecar, schema, import | Done except import |
 | M6 | peek-mcp bridge over the mutation API, peek-acp agent node, local Ollama backend | Done |

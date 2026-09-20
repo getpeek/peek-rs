@@ -75,5 +75,6 @@ The headless UI test `theme_picker_previews_reverts_and_commits` drives the pick
 
 Syntax colours into `ThemeConfig.highlight` (gpui-component's `ThemeStyle` has private fields;
 build it via JSON when the editor lands), swatch squares in picker rows, bundling the Monaspace
-and Chewy font files, per-theme dock icon (`src-tauri/src/dock_icon.rs`, PNGs in
-`~/labs/peek/src/assets/`), radial glow approximation for Pine.
+and Chewy font files, swapping the Dock icon per theme (`peek-ui/src/dock_icon/` applies the
+dark one at startup for every theme; the other two PNGs are in
+`~/labs/peek/src-tauri/icons/themes/`), radial glow approximation for Pine.

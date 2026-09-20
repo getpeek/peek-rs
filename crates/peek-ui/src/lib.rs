@@ -12,6 +12,7 @@ mod autosave;
 mod canvas;
 pub mod commands;
 mod database;
+mod dock_icon;
 mod execution;
 mod fuzzy;
 mod keymap_help;
@@ -137,6 +138,7 @@ pub fn run(launch: Launch) {
             log::warn!("peek: {error}");
         }
         init_with(&config, &launch, cx);
+        dock_icon::apply();
 
         let bounds = Bounds::centered(None, size(px(1280.0), px(840.0)), cx);
         let options = WindowOptions {

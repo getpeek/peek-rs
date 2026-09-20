@@ -18,7 +18,7 @@ Everything below refers to `~/labs/peek/src-tauri/`. Verdicts were verified by r
 | `src/mcp_commands.rs` | 70 | `emit("mcp:request")` bridge | rewrite as in-process `FrontendBridge` | not yet |
 | `src/acp_commands.rs` | 425 | `emit` host + `State` | rewrite the ~95-line host; **keep the ~180-line login-shell `PATH` recovery** (Dock-launched apps have a stripped `PATH`) | not yet |
 | `src/multiplayer/` (iroh docs + gossip) | 766 | `AppHandle` threaded through every loop, 8 `emit` sites | replace with an event-sink trait or channel; drop the base64 hop | not yet (M7) |
-| `src/dock_icon.rs` | 48 | `AppHandle::run_on_main_thread` | port with objc2 under an item-level `unsafe` allow | not yet |
+| `src/dock_icon.rs` | 48 | `AppHandle::run_on_main_thread` | ported with objc2 under an item-level `unsafe` expect; no queueing needed, `App` callbacks are already on the main thread | **done** (`peek-ui/src/dock_icon/`, the dark icon only) |
 | `src/window_chrome.rs` | 60 | WKWebView layer hacks | delete; gpui owns the window | n/a |
 | `src/lib.rs` / `main.rs` | 242 | everything | rewritten | **done** (`peek-ui::run`) |
 
