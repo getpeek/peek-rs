@@ -12,6 +12,11 @@
 //!
 //! The list the pill opens is [`panel::PagesPanel`], a full-window sibling rather than a child
 //! of this view — see that module for why.
+//!
+//! Tabs reorder by dragging one onto the slot another holds (`useTabDragReorder.ts`). The
+//! reference slides the dragged tab under the pointer with `translateX` and pushes its siblings
+//! aside; gpui has no transforms, so the gesture is gpui's own drag and drop instead — a lifted
+//! copy of the pill follows the cursor and the tab whose slot it would take lights up.
 
 mod panel;
 mod search;
@@ -30,8 +35,9 @@ use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{Icon, Sizable, StyledExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    App, BoxShadow, ClickEvent, Context, Entity, FocusHandle, FontWeight, Global, KeyDownEvent,
-    Rems, SharedString, Subscription, Window, div, point, px, rems,
+    App, BoxShadow, ClickEvent, Context, Div, Entity, FocusHandle, FontWeight, Global,
+    KeyDownEvent, MouseButton, MouseDownEvent, Rems, SharedString, Subscription, Window, div,
+    point, px, rems,
 };
 use peek_config::PageDisplay;
 use peek_document::PageId;
@@ -218,36 +224,23 @@ impl PageTabs {
         }
     }
 
-    fn tab(&self, row: &PageRow, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The tab at `slot` in display order. The index is what a drop on this tab reorders to,
+    /// so it has to be the position in the strip rather than anything derived from the id.
+    fn tab(&self, slot: (usize, &PageRow), cx: &mut Context<Self>) -> impl IntoElement {
+        let (index, row) = slot;
         let theme = cx.peek_theme();
-        let fg = if row.active { theme.fg } else { theme.fg_muted };
         let lit_text = theme.fg;
         let lit_surface = theme.node_bg_2;
-        let radius = theme.radius_pill;
-        let border = theme.node_border;
+        let accent = theme.accent_line;
 
         let id = row.id.clone();
         let name = row.name.clone();
+        let target = row.id.clone();
 
-        div()
+        tab_pill(row, cx)
             .id(SharedString::from(format!("page-tab-{}", row.id)))
             .test_support()
-            .h_flex()
-            .gap(rems(0.375))
-            .px_3()
-            .py_1()
-            .max_w(rems(15.0))
-            .flex_shrink_0()
-            .rounded(radius)
-            .border_1()
-            .border_color(border)
-            .when(row.active, |this| this.bg(lit_surface))
-            .text_xs()
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(fg)
             .hover(move |style| style.bg(lit_surface).text_color(lit_text))
-            .child(status_dot(row.active, cx))
-            .child(div().min_w_0().truncate().child(name.clone()))
             .when(row.closable, |this| {
                 this.child(close_button(row, &self.canvas_focus))
             })
@@ -261,6 +254,22 @@ impl PageTabs {
                 }
                 this.canvas
                     .update(cx, |canvas, cx| canvas.switch_to_page(&id, cx));
+            }))
+            .on_drag(DraggedTab { row: row.clone() }, |dragged, _, _, cx| {
+                let row = dragged.row.clone();
+                cx.new(|_| TabPreview(row))
+            })
+            // Lit while the pointer holds another tab over this one: the slot the drop takes.
+            .drag_over::<DraggedTab>(move |style, dragged, _, _| {
+                if dragged.row.id == target {
+                    return style;
+                }
+                style.bg(lit_surface).border_color(accent)
+            })
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                let page = dragged.row.id.clone();
+                this.canvas
+                    .update(cx, |canvas, cx| canvas.reorder_page(&page, index, cx));
             }))
     }
 
@@ -298,6 +307,68 @@ impl PageTabs {
                     .min_w_0()
                     .child(Input::new(&rename.input).appearance(false).xsmall()),
             )
+    }
+}
+
+/// The reference marks the whole selector `-webkit-app-region: no-drag`; this is the same
+/// thing said to gpui. `TitleBar` starts a window move on the first pointer move after a press
+/// and zooms the window on a double click, and the selector sits inside it — so without this a
+/// tab drag drags the window and a double click to rename maximises it. Registered before the
+/// element's own click machinery, which therefore still sees the press.
+fn no_window_drag(_: &MouseDownEvent, _: &mut Window, cx: &mut App) {
+    cx.stop_propagation();
+}
+
+/// The pill a tab is drawn as, and the one that follows the cursor while it is dragged: the
+/// same padding, hairline and dot, so what is picked up looks like what was grabbed.
+fn tab_pill(row: &PageRow, cx: &App) -> Div {
+    let theme = cx.peek_theme();
+    div()
+        .h_flex()
+        .gap(rems(0.375))
+        .px_3()
+        .py_1()
+        .max_w(rems(15.0))
+        .flex_shrink_0()
+        .rounded(theme.radius_pill)
+        .border_1()
+        .border_color(theme.node_border)
+        .when(row.active, |this| this.bg(theme.node_bg_2))
+        .text_xs()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(if row.active { theme.fg } else { theme.fg_muted })
+        .child(status_dot(row.active, cx))
+        .child(div().min_w_0().truncate().child(row.name.clone()))
+}
+
+/// What a tab drag carries. gpui matches drop targets on the payload's type, so this type
+/// existing is what makes a tab a target for another tab and for nothing else on screen.
+#[derive(Debug)]
+struct DraggedTab {
+    row: PageRow,
+}
+
+/// The pill under the cursor for the length of a drag. `.page-tab.dragging` lifts the tab with
+/// the node shadow and takes its background off the strip; here it also has to be opaque,
+/// because it floats over the canvas rather than over the bar.
+#[derive(Debug)]
+struct TabPreview(PageRow);
+
+impl Render for TabPreview {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.peek_theme();
+        tab_pill(&self.0, cx).bg(theme.node_bg).when_some(
+            theme.node_shadow,
+            |this, (offset_y, blur, color)| {
+                this.shadow(vec![BoxShadow {
+                    color,
+                    offset: point(px(0.0), offset_y),
+                    blur_radius: blur,
+                    spread_radius: px(0.0),
+                    inset: false,
+                }])
+            },
+        )
     }
 }
 
@@ -378,17 +449,18 @@ impl PageTabs {
             .id("page-tabs")
             .test_support()
             .on_key_down(cx.listener(Self::on_key_down))
+            .on_mouse_down(MouseButton::Left, no_window_drag)
             .h_flex()
             .gap_1()
             .min_w_0()
             .overflow_hidden()
-            .children(rows.iter().map(|row| {
+            .children(rows.iter().enumerate().map(|(index, row)| {
                 if Some(&row.id) == renaming.as_ref()
                     && let Some(rename) = self.rename.as_ref()
                 {
                     return Self::rename_field(row, rename, cx).into_any_element();
                 }
-                self.tab(row, cx).into_any_element()
+                self.tab((index, row), cx).into_any_element()
             }))
             .child(add_button(&self.canvas_focus, "+"))
     }
@@ -408,6 +480,7 @@ impl PageTabs {
         div()
             .id("page-picker")
             .test_support()
+            .on_mouse_down(MouseButton::Left, no_window_drag)
             .child(pill(label, badge, (open, cx)).on_click(|_, _, cx| PagesMenu::toggle(cx)))
     }
 }

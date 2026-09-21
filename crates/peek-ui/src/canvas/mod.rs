@@ -1073,6 +1073,17 @@ impl CanvasView {
         switched
     }
 
+    /// Moves a page to the slot `to` in the tab strip — what dropping one tab on another does.
+    pub(crate) fn reorder_page(&mut self, id: &PageId, to: usize, cx: &mut Context<Self>) -> bool {
+        self.document.update(cx, |document, cx| {
+            let moved = document.reorder_page(id, to);
+            if moved {
+                cx.notify();
+            }
+            moved
+        })
+    }
+
     pub(crate) fn rename_page(
         &mut self,
         id: &PageId,

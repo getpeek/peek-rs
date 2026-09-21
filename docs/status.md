@@ -971,6 +971,15 @@ listeners, the HUD and the toolbar are rebuilt every frame, which is cheap next 
   `flex_shrink_0` item with no width of its own measures at zero. The editing tab now carries a
   definite width and the tab's own border, dot and type scale, as `.page-tab-editing` does — a
   regression a test can hold, since the width is assertable where "looks wrong" is not.
+- **Tabs reorder by dragging one onto another's slot**, and the whole page selector stops the
+  press before `TitleBar` sees it — the reference's `-webkit-app-region: no-drag`. Without that
+  stop the bar starts a window move on the first pointer move after a press, so a tab drag
+  dragged the window, and it zooms the window on a double click, so double-clicking a tab to
+  rename it maximised the window as well. gpui has no transforms, so `useTabDragReorder`'s
+  `translateX` on the dragged tab and the sibling slide are replaced by gpui's own drag and
+  drop: a lifted copy of the pill follows the cursor and the tab whose slot the drop would take
+  lights up. The commit is `CanvasDocument::reorder_page`, the index semantics of
+  `useCanvas.reorderPage` exactly; it is not undoable, as renaming is not.
 - **`--fps` puts a frame-rate readout in the zoom cluster**, as a segment after the camera lock.
   It is **passive**: it counts frames gpui actually drew over a rolling second and reads `idle`
   when nothing is moving, because gpui redraws on demand and a still canvas draws nothing at all —

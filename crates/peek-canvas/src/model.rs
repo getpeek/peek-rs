@@ -774,6 +774,16 @@ impl Document {
         Some(outcome)
     }
 
+    /// Moves a page in display order. Not undoable, as renaming is not: page order is a
+    /// property of the strip rather than of the canvas the checkpoints cover.
+    pub fn reorder_page(&mut self, id: &PageId, to: usize) -> bool {
+        if !self.persisted.reorder_page(id, to) {
+            return false;
+        }
+        self.touch();
+        true
+    }
+
     pub fn rename_page(&mut self, id: &PageId, name: String) -> bool {
         if !self.persisted.rename_page(id, name) {
             return false;

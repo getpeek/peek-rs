@@ -181,6 +181,22 @@ impl CanvasDocument {
         self.active_page_id = id;
     }
 
+    /// Moves a page to `to` in display order, as `useCanvas.reorderPage` does: the page leaves
+    /// the list before it is put back, so `to` addresses the list without it. Out-of-range
+    /// indexes land in the last slot.
+    pub fn reorder_page(&mut self, id: &PageId, to: usize) -> bool {
+        let Some(from) = self.page_order.iter().position(|page| page == id) else {
+            return false;
+        };
+        let to = to.min(self.page_order.len() - 1);
+        if to == from {
+            return false;
+        }
+        let id = self.page_order.remove(from);
+        self.page_order.insert(to, id);
+        true
+    }
+
     pub fn rename_page(&mut self, id: &PageId, name: String) -> bool {
         let Some(page) = self.pages.get_mut(id) else {
             return false;
@@ -236,6 +252,21 @@ mod tests {
             document.active_page().map(|page| page.name.as_str()),
             Some("first")
         );
+    }
+
+    #[test]
+    fn a_page_dropped_on_another_takes_its_slot() {
+        let mut document = CanvasDocument::empty();
+        document.insert_page(Page::new("b"));
+        document.insert_page(Page::new("c"));
+        let first = document.page_order[0].clone();
+
+        assert!(document.reorder_page(&first, 2));
+        assert_eq!(names(&document), ["b", "c", "Page 1"]);
+        // Dropping a tab on itself is the gesture that changes nothing.
+        let moved = document.page_order[2].clone();
+        assert!(!document.reorder_page(&moved, 2));
+        assert!(!document.reorder_page(&moved, 99));
     }
 
     /// `create_page` takes the order straight from the agent, so an out-of-range number has to

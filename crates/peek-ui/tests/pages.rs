@@ -261,3 +261,41 @@ fn escape_cancels_a_rename_and_hands_focus_back(cx: &mut TestAppContext) {
     })
     .unwrap();
 }
+
+/// Dropping a tab on another takes that tab's slot, as `useTabDragReorder` commits its preview
+/// index. The drag also has to stay inside the strip: `TitleBar` starts a window move on the
+/// first pointer move after a press, which the test platform answers with `unimplemented!()`.
+#[gpui_kit::test]
+fn dragging_a_tab_onto_another_takes_its_slot(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let before = pages(cx, &workspace);
+    assert!(before.len() >= 2, "the fixture has more than one page");
+    let moved = before[0].clone();
+    let onto = before[1].clone();
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.drag_to(tab(&moved), tab(&onto), cx);
+    })
+    .unwrap();
+
+    let after = pages(cx, &workspace);
+    assert_eq!(after[0], onto);
+    assert_eq!(after[1], moved);
+    assert_eq!(after.len(), before.len());
+}
+
+/// Dropping a tab where it already is changes nothing, and the click the gesture would
+/// otherwise end in must not switch pages behind it.
+#[gpui_kit::test]
+fn dropping_a_tab_on_itself_leaves_the_order_alone(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let before = pages(cx, &workspace);
+    let stationary = before[1].clone();
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.drag_to(tab(&stationary), tab(&stationary), cx);
+    })
+    .unwrap();
+
+    assert_eq!(pages(cx, &workspace), before);
+}
