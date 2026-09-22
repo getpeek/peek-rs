@@ -1695,6 +1695,47 @@ mod render_tests {
         .unwrap();
     }
 
+    /// A committed JSON edit takes the panel down from *inside* an update on the table, so the
+    /// canvas must drop it without reaching back for that table — the double lease that would
+    /// otherwise be is a panic out of the run loop, and the save is where a user meets it.
+    #[gpui_kit::test]
+    fn committing_a_json_edit_takes_the_panel_down_without_re_entering_the_table(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, workspace) = open(cx, 2);
+        let table = cx
+            .update(|cx| workspace.read(cx).result_inner(&result_node(), cx))
+            .expect("the result node has a table");
+        let canvas = cx.update(|cx| workspace.read(cx).canvas_for_test().clone());
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            canvas.update(cx, |canvas, cx| {
+                canvas.open_json_editor(
+                    crate::canvas::json_editor::JsonEditorState {
+                        table: table.downgrade(),
+                        column: SharedString::from("meta"),
+                        anchor: gpui_kit::Bounds {
+                            origin: point(px(200.0), px(200.0)),
+                            size: size(px(180.0), px(34.0)),
+                        },
+                    },
+                    cx,
+                );
+            });
+            window.render_frame(cx);
+
+            // What the commit does once the statement comes back.
+            table.update(cx, super::ResultTable::dismiss_edit);
+
+            window.render_frame(cx);
+            assert!(
+                window.try_find("json-editor").is_none(),
+                "the panel came down"
+            );
+        })
+        .unwrap();
+    }
+
     /// `cmd-f` opens the find bar while the table has focus.
     /// Pivoting transposes the grid: a table row is now one of the result's *columns*, and a
     /// table column is one record. `DataTable` registers no ids for its cells, so the delegate's

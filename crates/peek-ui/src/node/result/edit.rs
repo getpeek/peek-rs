@@ -71,12 +71,11 @@ impl ResultTable {
     /// The node's own escape rule and every commit go through here; only the canvas, which has
     /// already taken the panel down, calls [`Self::cancel_edit`] directly.
     pub(super) fn dismiss_edit(&mut self, cx: &mut Context<Self>) {
-        // Taking the panel down cancels the edit behind it, so only an edit that had no panel —
-        // the in-cell field — still needs cancelling here.
-        if let Some(canvas) = self.canvas.upgrade()
-            && canvas.update(cx, crate::canvas::CanvasView::close_json_editor)
-        {
-            return;
+        // This runs mid-update on the table, so the canvas drops the panel without reaching
+        // back for it — `close_json_editor` would, and that double lease aborts the app on
+        // every successful save. Cancelling the edit here is the half it leaves out.
+        if let Some(canvas) = self.canvas.upgrade() {
+            canvas.update(cx, crate::canvas::CanvasView::drop_json_editor);
         }
         self.cancel_edit(cx);
     }

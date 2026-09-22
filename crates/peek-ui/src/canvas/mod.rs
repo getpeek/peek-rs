@@ -473,6 +473,17 @@ impl CanvasView {
         cx.notify();
     }
 
+    /// Takes the panel down and leaves the table alone.
+    ///
+    /// For the commit path, which closes the panel from inside an update on that very table:
+    /// reaching back for it there is a double lease, and a double lease takes the app with it.
+    /// The table clears its own edit instead.
+    pub(crate) fn drop_json_editor(&mut self, cx: &mut Context<Self>) {
+        if self.json_editor.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// Closes the panel and clears the edit behind it, so the cell stops being an anchor.
     pub(crate) fn close_json_editor(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(editor) = self.json_editor.take() else {
