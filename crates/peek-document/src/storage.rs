@@ -9,6 +9,7 @@ use std::time::SystemTime;
 use peek_config::PersistenceMode;
 
 use crate::document::{CanvasDocument, DocumentError};
+use crate::history::HistoryFile;
 use crate::results_file::ResultsFile;
 
 #[derive(Debug)]
@@ -102,6 +103,20 @@ impl DocumentStore {
         let dir = self.workspace_dir(workspace)?;
         let path = dir.join(format!("{}.results.json", connection.to_lowercase()));
         Ok(ResultsFile::new(path, self.mode))
+    }
+
+    /// Opens a handle to one connection's version history.
+    ///
+    /// Not beside the document: the Tauri host's `append_history` joins `~/peek/<workspace>`
+    /// itself and never went through the `workspaces/` move, so that flat directory is where
+    /// every existing log lives and where the TypeScript app keeps appending.
+    #[must_use]
+    pub fn open_history(&self, workspace: &str, connection: &str) -> HistoryFile {
+        let path = self
+            .base
+            .join(workspace.to_lowercase())
+            .join(format!("{}.history.jsonl", connection.to_lowercase()));
+        HistoryFile::new(path, self.mode)
     }
 
     /// Moves a connection's document and its rows sidecar to a new name, so renaming a

@@ -5828,6 +5828,7 @@ dependencies = [
 name = "peek-document"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "log",
  "nanoid",
  "peek-config",

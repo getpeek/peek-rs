@@ -112,6 +112,19 @@ Decisions taken with the user, plus reasoning that is not visible in the code.
   all four selection corners in every theme, so six identical `ThemeSpec` entries would carry no
   information; it sits in `resolved.rs` beside `row_selected()`, which is derived for the same
   reason. The rule that a radius comes from the theme still holds — the node never spells it.
+- **The version-history log lives in the legacy flat directory**,
+  `~/peek/<workspace>/<connection>.history.jsonl`, not beside the document under `workspaces/`.
+  The Tauri host's `append_history` builds `$HOME/peek/<workspace>` itself and never went through
+  the `workspaces/` move, so that is where every existing log is and where the TypeScript app
+  keeps appending. Writing anywhere else would split one history into two. A connection rename
+  leaves the log behind, as the reference does.
+- **A history preview swaps what the canvas draws, never the document.** `CanvasView::shown()` is
+  a detached `Document` of the old page, and the live node-state map is set aside for a fresh
+  one: the live editors keep their text and focus, and every mutation path (MCP, autosave,
+  undo) still sees only the live document.
+- **Snapshots compare as the log would give them back.** `PageSnapshot::of` clears `selected` and
+  `measured`, which a write drops; otherwise an unchanged page never equals the tail parsed from
+  disk and every flush would record a version.
 
 ## Verified gpui/gpui-kit facts the design relies on
 

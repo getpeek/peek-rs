@@ -113,6 +113,10 @@ pub enum Interaction {
         /// resize is always computed from the start rather than accumulated per frame.
         origin: Point,
         start: Rect,
+        /// Cmd was held at the press: the opposite edge mirrors the grab.
+        symmetric: bool,
+        /// The kind's minimum, which a symmetric resize clamps to about the centre.
+        min: Size,
     },
     /// The draw tool is armed. `samples` is empty until a press lands and is emptied again by
     /// the commit, without leaving the state: `useDrawTool` never clears place mode, so draw is
@@ -449,11 +453,18 @@ fn on_move(
             corner,
             origin,
             start,
+            symmetric,
+            min,
         } => {
             let delta = camera.screen_to_world(screen) - *origin;
+            let bounds = if *symmetric {
+                corner.resize_symmetric(*start, delta, *min)
+            } else {
+                corner.resize(*start, delta)
+            };
             vec![Effect::ResizeNode {
                 id: id.clone(),
-                bounds: corner.resize(*start, delta),
+                bounds,
             }]
         }
         // The node is real from the first frame past the threshold, so the drag sizes the node
@@ -549,16 +560,21 @@ fn begin_drag(
         // move converts its own position, so the two are never mixed with raw screen pixels.
         let origin = camera.screen_to_world(start.origin);
         let delta = camera.screen_to_world(start.screen) - origin;
+        let symmetric = start.modifiers.secondary;
+        let bounds = if symmetric {
+            corner.resize_symmetric(hit.bounds, delta, hit.min_size)
+        } else {
+            corner.resize(hit.bounds, delta)
+        };
         *state = Interaction::ResizingNode {
             id: hit.id.clone(),
             corner,
             origin,
             start: hit.bounds,
+            symmetric,
+            min: hit.min_size,
         };
-        return vec![Effect::ResizeNode {
-            id: hit.id,
-            bounds: corner.resize(hit.bounds, delta),
-        }];
+        return vec![Effect::ResizeNode { id: hit.id, bounds }];
     }
     let node = hit.id;
     let mut effects = Vec::new();
@@ -776,6 +792,7 @@ mod tests {
             id: NodeId::from(id),
             region: NodeRegion::Header,
             bounds: Rect::new(Point::new(0.0, 0.0), Size::new(300.0, 200.0)),
+            min_size: Size::default(),
         }
     }
 
@@ -1161,6 +1178,7 @@ mod tests {
             id: NodeId::from(id),
             region,
             bounds: Rect::new(Point::new(0.0, 0.0), Size::new(300.0, 200.0)),
+            min_size: Size::default(),
         }
     }
 
@@ -1512,6 +1530,83 @@ mod tests {
         };
         assert_eq!(bounds.origin, Point::new(20.0, 20.0));
         assert_eq!(bounds.size, Size::new(280.0, 180.0));
+    }
+
+    #[test]
+    fn cmd_dragging_a_corner_resizes_about_the_centre() {
+        let mut state = Interaction::default();
+        // 40 screen px at the harness's zoom of 2.0 is 20 world units.
+        let effects = drive(
+            &mut state,
+            &GestureConfig::default(),
+            &BTreeSet::new(),
+            vec![
+                cmd_press(
+                    Point::new(298.0, 198.0),
+                    Hit::Node(on("t1", NodeRegion::Resize(Corner::BottomRight))),
+                ),
+                Input::Move {
+                    screen: Point::new(338.0, 238.0),
+                },
+            ],
+        );
+
+        let Some(Effect::ResizeNode { bounds, .. }) = effects.last() else {
+            panic!("expected a resize, got {effects:?}");
+        };
+        assert_eq!(bounds.origin, Point::new(-20.0, -20.0));
+        assert_eq!(bounds.size, Size::new(340.0, 240.0));
+    }
+
+    #[test]
+    fn cmd_dragging_a_side_resizes_only_that_axis_symmetrically() {
+        let mut state = Interaction::default();
+        let effects = drive(
+            &mut state,
+            &GestureConfig::default(),
+            &BTreeSet::new(),
+            vec![
+                cmd_press(
+                    Point::new(298.0, 100.0),
+                    Hit::Node(on("t1", NodeRegion::Resize(Corner::Right))),
+                ),
+                Input::Move {
+                    screen: Point::new(338.0, 140.0),
+                },
+            ],
+        );
+
+        let Some(Effect::ResizeNode { bounds, .. }) = effects.last() else {
+            panic!("expected a resize, got {effects:?}");
+        };
+        assert_eq!(bounds.origin, Point::new(-20.0, 0.0));
+        assert_eq!(bounds.size, Size::new(340.0, 200.0));
+    }
+
+    #[test]
+    fn a_symmetric_shrink_stops_at_the_minimum_without_drifting() {
+        let mut state = Interaction::default();
+        let hit = NodeHit {
+            min_size: Size::new(200.0, 150.0),
+            ..on("t1", NodeRegion::Resize(Corner::TopLeft))
+        };
+        let effects = drive(
+            &mut state,
+            &GestureConfig::default(),
+            &BTreeSet::new(),
+            vec![
+                cmd_press(Point::new(2.0, 2.0), Hit::Node(hit)),
+                Input::Move {
+                    screen: Point::new(400.0, 400.0),
+                },
+            ],
+        );
+
+        let Some(Effect::ResizeNode { bounds, .. }) = effects.last() else {
+            panic!("expected a resize, got {effects:?}");
+        };
+        assert_eq!(bounds.size, Size::new(200.0, 150.0));
+        assert_eq!(bounds.center(), Point::new(150.0, 100.0));
     }
 
     #[test]

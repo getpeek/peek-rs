@@ -91,7 +91,7 @@ impl CanvasView {
         if !Settings::get(cx).canvas.enable_regions {
             return Vec::new();
         }
-        let document = self.document.read(cx);
+        let document = self.shown().read(cx);
         derive::derive(document.nodes(), document.regions())
     }
 

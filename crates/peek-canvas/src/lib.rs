@@ -21,6 +21,7 @@ pub mod regions;
 pub mod render_scale;
 mod scope;
 pub mod stroke;
+pub mod timeline;
 pub mod tools;
 
 pub use camera::{Camera, MAX_ZOOM, MIN_ZOOM};

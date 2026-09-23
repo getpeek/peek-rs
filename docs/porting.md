@@ -12,7 +12,7 @@ Everything below refers to `~/labs/peek/src-tauri/`. Verdicts were verified by r
 | `src/import/` (csv/json → temp table) | 193 | none | copy | not yet (M5) |
 | `src/config/mod.rs` | 508 | `#[tauri::command]` ×10, `AppHandle` on `set_theme` | strip glue | **done** → `peek-config` |
 | `src/config/keymap.rs` (typed `Action` enum + defaults) | 268 | none | not ported: gpui `actions!` and the registry own ids and defaults | replaced |
-| `src/storage_commands.rs` | 230 | wrappers | port paths + migration; document schema had to move into Rust | **done** → `peek-document` (history log paths not yet) |
+| `src/storage_commands.rs` | 230 | wrappers | port paths + migration; document schema had to move into Rust | **done** → `peek-document` (history log: `DocumentStore::open_history`) |
 | `src/database_commands.rs` | 89 | wrappers | became `peek_db::Session` methods; the runtime lives there so UI code needs no tokio | **done** (execution not yet wired to the canvas) |
 | `src/lsp_commands.rs` | 78 | wrappers | not ported: the UI calls `Backend` directly | replaced |
 | `src/mcp_commands.rs` | 70 | `emit("mcp:request")` bridge | rewrite as in-process `FrontendBridge` | not yet |
@@ -36,7 +36,7 @@ The React app is the behaviour spec. Most useful files:
 | 30-method canvas API (the natural trait boundary) | `src/canvas/state.ts:252-292`, `src/canvas/hooks/useCanvas.ts` |
 | Edges: floating bezier from rect intersections, tinted by **target** kind; only variable→query and result→chart carry data | `src/canvas/edges/FloatingEdge.tsx`, `src/canvas/variables.ts`, `src/canvas/hooks/useChartSync.ts` |
 | Regions & wayfinding (padding 56, cross-fade 0.35→0.21, beacons, edge peekers) | `src/canvas/wayfinding/` |
-| Undo (50 snapshots, 300 ms coalescing) and version history (JSONL, full every 20) | `src/canvas/ui/useUndoHistory.ts`, `src/canvas/history/` |
+| Undo (50 snapshots, 300 ms coalescing) and version history (JSONL, full every 20) — **ported**, `peek_document::history` + `peek_ui::canvas::history` | `src/canvas/ui/useUndoHistory.ts`, `src/canvas/history/` |
 | Autosave (3 s debounce, document + results sidecar) | `src/canvas/hooks/useAutoSaveDocument.ts` |
 | Query execution and result placement (`x + width + 50`, per-type column widths) — **ported**, `peek_canvas::execution` + `peek_ui::execution` | `src/canvas/executeQueries.ts` |
 | Jump labels (`g`), page search (`cmd-f`), minimap (176×116) | `src/canvas/jump/`, `src/page-search/`, `src/canvas/minimap/` |

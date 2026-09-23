@@ -6,8 +6,8 @@
 //! does. Deciding the region from the pointer's world position instead keeps the whole rule
 //! in one pure, window-free function.
 
-use peek_document::geometry::{Point, Rect};
-use peek_document::{Edge, EdgeId, Node, NodeId, NodeKind, Page};
+use peek_document::geometry::{Point, Rect, Size};
+use peek_document::{Edge, EdgeId, Node, NodeId, NodeKind, NodeType, Page};
 
 use crate::edge::{EdgeCurve, can_connect, curve_between};
 
@@ -77,6 +77,27 @@ impl Corner {
         }
         Rect::from_corners(min, max)
     }
+
+    /// The node's new bounds when this grab is dragged by `delta` with the opposite edge
+    /// mirroring it, the way a macOS window resizes with option held: the node grows and
+    /// shrinks about its centre. The minimum is applied here rather than left to the document, whose
+    /// clamp keeps the origin and would slide a node shrunk past it off its centre.
+    #[must_use]
+    pub fn resize_symmetric(self, start: Rect, delta: Point, min: Size) -> Rect {
+        let (left, top, right, bottom) = self.edges();
+        let mut size = start.size;
+        if left || right {
+            let outward = if right { delta.x } else { -delta.x };
+            size.width = (size.width + 2.0 * outward).max(min.width);
+        }
+        if top || bottom {
+            let outward = if bottom { delta.y } else { -delta.y };
+            size.height = (size.height + 2.0 * outward).max(min.height);
+        }
+        let center = start.center();
+        let origin = Point::new(center.x - size.width / 2.0, center.y - size.height / 2.0);
+        Rect::new(origin, size)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +128,8 @@ pub struct NodeHit {
     pub region: NodeRegion,
     /// The node's bounds at press time, so a resize is computed from where it started.
     pub bounds: Rect,
+    /// The kind's smallest size, which a symmetric resize clamps to about the centre.
+    pub min_size: Size,
 }
 
 /// What `world` lands on, nodes before edges.
@@ -204,6 +227,9 @@ pub fn node_hit_at(nodes: &[Node], world: Point, zoom: f64) -> Option<NodeHit> {
         id: node.id.clone(),
         region: region_of(bounds, world, zoom),
         bounds,
+        min_size: node
+            .node_type()
+            .map_or_else(Size::default, NodeType::min_size),
     })
 }
 
@@ -253,8 +279,7 @@ fn region_of(bounds: Rect, world: Point, zoom: f64) -> NodeRegion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use peek_document::geometry::Size;
-    use peek_document::{DrawData, NodeType, TextData};
+    use peek_document::{DrawData, TextData};
 
     fn nodes() -> Vec<Node> {
         vec![Node {
@@ -332,6 +357,26 @@ mod tests {
         assert_eq!(
             Corner::Top.resize(start, delta),
             Rect::new(Point::new(0.0, 10.0), Size::new(100.0, 90.0))
+        );
+    }
+
+    #[test]
+    fn a_symmetric_resize_mirrors_the_grab_about_the_centre() {
+        let start = Rect::new(Point::new(0.0, 0.0), Size::new(100.0, 100.0));
+        let delta = Point::new(-10.0, 10.0);
+        let min = Size::default();
+
+        assert_eq!(
+            Corner::Left.resize_symmetric(start, delta, min),
+            Rect::new(Point::new(-10.0, 0.0), Size::new(120.0, 100.0))
+        );
+        assert_eq!(
+            Corner::BottomLeft.resize_symmetric(start, delta, min),
+            Rect::new(Point::new(-10.0, -10.0), Size::new(120.0, 120.0))
+        );
+        assert_eq!(
+            Corner::Top.resize_symmetric(start, delta, min),
+            Rect::new(Point::new(0.0, 10.0), Size::new(100.0, 80.0))
         );
     }
 

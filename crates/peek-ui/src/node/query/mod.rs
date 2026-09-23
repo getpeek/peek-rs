@@ -225,7 +225,10 @@ impl QueryEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let uri = language::uri_for(&node);
+        // A version preview renders these nodes a second time, under the same ids: its editors
+        // must not open, and later close, the language-server documents the live ones hold.
+        let detached = document.read(cx).is_detached();
+        let uri = language::uri_for(&node).filter(|_| !detached);
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language("sql")
@@ -246,6 +249,7 @@ impl QueryEditor {
         let menu_open = Rc::new(Cell::new(false));
         if let Some(completions) =
             language::SqlCompletions::new(node.clone(), Rc::clone(&menu_open), document.downgrade())
+                .filter(|_| !detached)
         {
             editor.update(cx, |state, _| {
                 state.lsp_mut().completion_provider = Some(completions);
@@ -427,9 +431,10 @@ impl QueryEditor {
     /// `liveIntervalMs` is persisted, so a document saved with live on comes back polling — the
     /// reference behaves the same way.
     fn reconcile_live(&mut self, data: &QueryData, window: &mut Window, cx: &mut Context<Self>) {
+        // A past version is looked at, never run: a preview must not poll the database.
         let interval = match data.live_interval_ms {
-            Some(LiveInterval::EveryMs(ms)) => Some(ms),
-            Some(LiveInterval::Off) | None => None,
+            Some(LiveInterval::EveryMs(ms)) if !self.document.read(cx).is_detached() => Some(ms),
+            Some(LiveInterval::EveryMs(_) | LiveInterval::Off) | None => None,
         };
         if interval == self.live_interval {
             return;

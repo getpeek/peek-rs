@@ -29,7 +29,7 @@ pub mod edit {
 
 pub mod history {
     use super::actions;
-    actions!(History, [Undo, Redo]);
+    actions!(History, [Undo, Redo, Toggle]);
 }
 
 pub mod zoom {

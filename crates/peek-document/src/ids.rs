@@ -50,6 +50,7 @@ id_type!(NodeId);
 id_type!(PageId);
 id_type!(EdgeId);
 id_type!(RegionId);
+id_type!(CheckpointId);
 
 fn fresh(prefix: &str) -> String {
     format!("{prefix}_{}", nanoid::nanoid!(8))
@@ -66,6 +67,13 @@ impl RegionId {
     #[must_use]
     pub fn generate() -> Self {
         Self(fresh("region"))
+    }
+}
+
+impl CheckpointId {
+    #[must_use]
+    pub fn generate() -> Self {
+        Self(fresh("chk"))
     }
 }
 

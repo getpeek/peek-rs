@@ -9,6 +9,7 @@ mod edges;
 mod element;
 mod frame_stats;
 mod grid;
+pub(crate) mod history;
 mod hud;
 pub(crate) mod json_editor;
 mod jump;
@@ -125,6 +126,12 @@ pub(crate) struct CanvasView {
     /// The AI grouping in flight, or `None`. Held here rather than in the picker because the
     /// palette can start one with the picker closed, and dropping it cancels the request.
     grouping: Option<dispatch::regions::GroupingRun>,
+    /// Automatic checkpoints of this document, and the timeline over them.
+    history: Entity<history::VersionHistory>,
+    history_panel: Entity<history::HistoryPanel>,
+    /// A past version on screen instead of the live page, or `None`.
+    preview: Option<history::Preview>,
+    _history_events: Subscription,
 }
 
 impl std::fmt::Debug for CanvasView {
@@ -149,8 +156,15 @@ impl CanvasView {
         cx.observe_in(&document, window, |this, document, window, cx| {
             cx.notify();
             this.frame_requested(&document, window, cx);
+            this.history_follow_page(cx);
         })
         .detach();
+        let version_history = {
+            let document = document.clone();
+            cx.new(|cx| history::VersionHistory::new(document, None, cx))
+        };
+        let history_panel = cx.new(history::HistoryPanel::new);
+        let history_events = cx.subscribe_in(&history_panel, window, Self::on_history_event);
         let focus_out = cx.on_focus_out(&focus_handle, window, |this, _, _, cx| {
             this.space_held = false;
             if this.jump.take().is_some() {
@@ -187,6 +201,10 @@ impl CanvasView {
             regions,
             suggestions,
             grouping: None,
+            history: version_history,
+            history_panel,
+            preview: None,
+            _history_events: history_events,
         }
     }
 
@@ -1372,6 +1390,22 @@ impl CanvasView {
             MouseButton::Navigate(_) => return,
         };
         let screen = self.to_pane(event.position);
+        if self.history_open(cx) {
+            // The board is frozen under the timeline: any press pans, and nothing under it —
+            // a node's editor included — ever hears of it.
+            self.reduce(
+                gesture::Input::Down {
+                    button: gesture::Button::Middle,
+                    screen,
+                    modifiers: modifiers(event.modifiers),
+                    on: None,
+                },
+                window,
+                cx,
+            );
+            cx.stop_propagation();
+            return;
+        }
         let on = self.hit_at(screen, cx);
         // An option-press on a card may become a connection, which the node's own content
         // (the SQL editor's caret, the result table's cell selection) must never also claim.
@@ -1398,7 +1432,9 @@ impl CanvasView {
         cx: &mut Context<Self>,
     ) {
         if self.interaction.is_idle() {
-            self.hover(event.position, event.modifiers, cx);
+            if !self.history_open(cx) {
+                self.hover(event.position, event.modifiers, cx);
+            }
             return;
         }
         let screen = self.to_pane(event.position);
@@ -1418,6 +1454,11 @@ impl CanvasView {
             MouseButton::Navigate(_) => return,
         };
         let screen = self.to_pane(event.position);
+        let button = if self.history_open(cx) {
+            gesture::Button::Middle
+        } else {
+            button
+        };
         self.reduce(gesture::Input::Up { button, screen }, window, cx);
     }
 
@@ -1601,7 +1642,7 @@ impl CanvasView {
         // Cloned so the per-kind bodies below can take `&mut App`: `Entity::read` borrows it.
         // Only what the camera can see is cloned: an agent node carries its whole message
         // history, tool arguments and all, and a page of them is megabytes a frame otherwise.
-        let document = self.document.read(cx);
+        let document = self.shown().read(cx);
         let total_nodes = document.nodes().len();
         let nodes: Vec<peek_document::Node> = document
             .nodes()
@@ -1784,7 +1825,7 @@ impl CanvasView {
     /// One [`EdgeItem`] per visible edge, tinted by the kind it points at.
     fn edge_items(&self, visible: Rect, cx: &App) -> Vec<EdgeItem> {
         let theme = cx.peek_theme();
-        let document = self.document.read(cx);
+        let document = self.shown().read(cx);
         let page = document.active_page();
         // `Page::node` is a linear scan, and every edge needs two of them: on a page with as
         // many edges as nodes that is quadratic work for a lookup, every frame.
@@ -1822,6 +1863,19 @@ fn edge_state(document: &Document, edge: &Edge) -> EdgeState {
     EdgeState::Resting
 }
 
+impl CanvasView {
+    /// Which context the canvas publishes: the timeline and jump mode each take the keyboard.
+    fn key_context(&self, history_open: bool) -> &'static str {
+        if history_open {
+            commands::CANVAS_HISTORY
+        } else if self.jump.is_some() {
+            commands::CANVAS_JUMPING
+        } else {
+            commands::CANVAS
+        }
+    }
+}
+
 impl Render for CanvasView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.tick_flight(window, cx);
@@ -1839,7 +1893,8 @@ impl Render for CanvasView {
 
         let (items, selected_rects) = self.node_items(visible, window, cx);
         let regions = self.derived_regions(cx);
-        let nodes = self.document.read(cx).nodes().to_vec();
+        let nodes = self.shown().read(cx).nodes().to_vec();
+        let history_open = self.history_open(cx);
 
         let overlay = Overlay {
             edges: self.edge_items(visible, cx),
@@ -1866,11 +1921,7 @@ impl Render for CanvasView {
             .size_full()
             .overflow_hidden()
             .track_focus(&self.focus_handle)
-            .key_context(if self.jump.is_some() {
-                commands::CANVAS_JUMPING
-            } else {
-                commands::CANVAS
-            })
+            .key_context(self.key_context(history_open))
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::reset_zoom))
@@ -1904,7 +1955,9 @@ impl Render for CanvasView {
             .on_key_down(cx.listener(Self::on_key_down))
             .on_key_up(cx.listener(Self::on_key_up))
             .child(div().absolute().inset_0().child(canvas))
-            .when(self.chrome_visible, |this| {
+            // Hidden under the timeline, as `body[data-history-open]` fades them: their buttons
+            // dispatch straight to the canvas, and would edit the page behind a preview.
+            .when(self.chrome_visible && !history_open, |this| {
                 this.child(hud::render(self, cx))
                     .child(toolbar::render(self, window, cx))
             })
@@ -1918,14 +1971,17 @@ impl Render for CanvasView {
             // Under the transient surfaces below but over the HUD, as `WayfindingLayer` sits
             // over the React Flow panels: a beacon is what you navigate by when the cards have
             // receded, so nothing but a menu should cover it.
-            .children(wayfinding::render(
-                self,
-                &regions,
-                wayfinding::Frame { camera, pane },
-                cx,
-            ))
-            .child(self.suggestions.clone())
-            .child(self.regions.clone())
+            .when(!history_open, |this| {
+                this.children(wayfinding::render(
+                    self,
+                    &regions,
+                    wayfinding::Frame { camera, pane },
+                    cx,
+                ))
+                .child(self.suggestions.clone())
+                .child(self.regions.clone())
+            });
+        let element = history::layers(self, element, cx)
             // Last of all: the menu is the most transient surface on the canvas, and a press
             // anywhere outside it has to reach its scrim before anything else.
             .children(context_menu::render(self, cx))

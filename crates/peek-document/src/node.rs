@@ -275,6 +275,7 @@ where
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryData {
+    #[serde(default, deserialize_with = "null_as_empty")]
     pub query: String,
     #[serde(
         default,
@@ -370,7 +371,14 @@ pub struct TableDefinitionData {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct TextData {
+    #[serde(default, deserialize_with = "null_as_empty")]
     pub text: String,
+}
+
+/// The TypeScript editors have written `null` for a cleared note or query, and real
+/// version-history logs carry it; refusing it would drop the whole checkpoint.
+fn null_as_empty<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Option::unwrap_or_default)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

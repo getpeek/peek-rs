@@ -16,6 +16,7 @@ use peek_config::{PeekConfig, PersistenceMode};
 
 use crate::database::Database;
 use crate::settings::Settings;
+use peek_document::history::HistoryFile;
 use peek_document::{
     CanvasDocument, DocumentFile, DocumentStore, ResultSet, ResultSidecar, ResultsFile,
 };
@@ -101,6 +102,10 @@ impl WorkspaceView {
         view.picker
             .update(cx, |picker, _| picker.set_current(&current.0, &current.1));
         view.adopt_results(loaded.results, cx);
+        if let Some(file) = loaded.history_file {
+            view.canvas
+                .update(cx, |canvas, cx| canvas.use_history_file(file, cx));
+        }
         connect_to(&view.config, &view.workspace, &view.connection, cx);
         view.autosave = Self::autosave_for(
             &view.document(cx),
@@ -211,6 +216,7 @@ impl WorkspaceView {
         if let Some(autosave) = self.autosave.take() {
             autosave.update(cx, Autosave::flush);
         }
+        self.canvas.update(cx, CanvasView::flush_history);
 
         let loaded = load_document(&workspace, &connection, self.persistence);
         let results = loaded.results;
@@ -226,7 +232,13 @@ impl WorkspaceView {
         let canvas =
             cx.new(|cx| CanvasView::new(document.clone(), self.canvas_focus.clone(), window, cx));
         let visible = self.ui_visible;
-        canvas.update(cx, |canvas, cx| canvas.set_chrome_visible(visible, cx));
+        let history_file = loaded.history_file;
+        canvas.update(cx, |canvas, cx| {
+            canvas.set_chrome_visible(visible, cx);
+            if let Some(file) = history_file {
+                canvas.use_history_file(file, cx);
+            }
+        });
 
         self.page_tabs = cx.new(|cx| PageTabs::new(canvas.clone(), self.canvas_focus.clone(), cx));
         self.pages_panel =
@@ -461,6 +473,9 @@ impl WorkspaceView {
         // click-away with one call.
         self.palette
             .update(cx, |palette, cx| palette.set_query("", window, cx));
+        // Every command the palette lists would act on the live page behind a preview.
+        self.canvas
+            .update(cx, |canvas, cx| canvas.close_history(window, cx));
 
         let scope = self.canvas.read(cx).scope(cx);
         log::debug!("peek: opening palette with scope {scope:?}");
@@ -585,6 +600,7 @@ struct Loaded {
     results: ResultSidecar,
     file: Option<DocumentFile>,
     results_file: Option<ResultsFile>,
+    history_file: Option<HistoryFile>,
 }
 
 /// Loads a connection's document and its rows sidecar.
@@ -598,6 +614,7 @@ fn load_document(workspace: &str, connection: &str, mode: PersistenceMode) -> Lo
                 results: ResultSidecar::default(),
                 file: None,
                 results_file: None,
+                history_file: None,
             };
         }
     };
@@ -611,6 +628,7 @@ fn load_document(workspace: &str, connection: &str, mode: PersistenceMode) -> Lo
                 results: ResultSidecar::default(),
                 file: None,
                 results_file: None,
+                history_file: None,
             };
         }
     };
@@ -655,6 +673,7 @@ fn load_document(workspace: &str, connection: &str, mode: PersistenceMode) -> Lo
         results,
         file: Some(file),
         results_file,
+        history_file: Some(store.open_history(workspace, connection)),
     }
 }
 

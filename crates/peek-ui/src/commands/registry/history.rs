@@ -1,4 +1,6 @@
-use super::super::{CANVAS_NOT_TYPING, Command, Group, actions, can_redo, can_undo};
+use super::super::{
+    CANVAS_NOT_TYPING, CANVAS_OR_HISTORY, Command, Group, actions, always, can_redo, can_undo,
+};
 
 pub(super) static ENTRIES: &[Command] = &[
     Command {
@@ -22,5 +24,17 @@ pub(super) static ENTRIES: &[Command] = &[
         context: CANVAS_NOT_TYPING,
         build: || Box::new(actions::history::Redo),
         available: can_redo,
+    },
+    // The reference opens the timeline from the palette only; `cmd-y` is ours.
+    Command {
+        id: "History::Toggle",
+        title: "Show history",
+        label: None,
+        group: Group::History,
+        keywords: "history versions timeline checkpoints restore scrub",
+        default_keys: &["meta-y"],
+        context: CANVAS_OR_HISTORY,
+        build: || Box::new(actions::history::Toggle),
+        available: always,
     },
 ];

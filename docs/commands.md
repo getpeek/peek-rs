@@ -97,7 +97,7 @@ carries rather than restating the rule that decides whether there is anything to
 Not implemented, each blocked on a feature rather than on the command:
 `Tool::LassoSelect` (no selection-tool state, no freehand `Interaction`, nothing to paint the
 path), `View::ShowRunningQueries` (the Activity node is still a placeholder), the
-minimap and history-panel toggles, and the collaboration commands. Registering any of them now
+minimap toggle, and the collaboration commands. Registering any of them now
 would put a row in the palette that does nothing, which is the failure the `Command`/handler
 pairing exists to prevent.
 
@@ -117,7 +117,9 @@ while the canvas subtree held focus, and the picker has to open from the title b
 instead of toggling the panel shut.
 
 `History::{Undo,Redo}` are bound on `CANVAS`, which excludes `Input`, so
-gpui-kit's own `cmd-z` wins while a node editor has focus. `Tool::{Query,Agent,Text,Variable}` arm place
+gpui-kit's own `cmd-z` wins while a node editor has focus. `History::Toggle` (`cmd-y`) is bound on
+`CANVAS_OR_HISTORY`: the timeline swaps the canvas's context for `CanvasHistory`, and the key
+that opened it has to close it too. `Tool::{Query,Agent,Text,Variable}` arm place
 mode rather than creating a node directly; the next click places it. `Tool::Draw` arms the pen
 instead, which is sticky — see "The draw tool" in `canvas.md`.
 

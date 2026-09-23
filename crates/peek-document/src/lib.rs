@@ -10,6 +10,7 @@ mod document;
 mod edge;
 pub mod export;
 pub mod geometry;
+pub mod history;
 mod ids;
 mod kinds;
 mod migrate;
@@ -24,7 +25,7 @@ pub use agent::{AgentMessage, PlanEntry, ToolCall};
 pub use document::{CanvasDocument, DocVersion, DocumentError, Page, Viewport};
 pub use edge::Edge;
 pub use export::{filename as export_filename, slug as export_slug, to_csv, to_json};
-pub use ids::{EdgeId, NodeId, PageId, RegionId};
+pub use ids::{CheckpointId, EdgeId, NodeId, PageId, RegionId};
 pub use kinds::{FALLBACK_SIZE, NodeType};
 pub use migrate::normalize;
 pub use node::{

@@ -29,6 +29,14 @@ pub const CANVAS_NOT_TYPING: &str = "Canvas && !Input && !NumberInput && !JumpMo
 /// `Canvas` is what makes every `!JumpMode` binding above go dead for the duration, so a
 /// letter picks a label instead of arming a tool — no second focus handle needed.
 pub const CANVAS_JUMPING: &str = "Canvas JumpMode";
+/// The canvas while the version-history timeline is open. Deliberately *not* `Canvas`: every
+/// canvas binding goes dead, so nothing edits the page underneath a preview and the arrows and
+/// Enter belong to the timeline.
+pub const CANVAS_HISTORY: &str = "CanvasHistory";
+/// A predicate: the canvas when not typing, or with the timeline open — so the key that opens
+/// the timeline also closes it.
+pub const CANVAS_OR_HISTORY: &str =
+    "(Canvas && !Input && !NumberInput && !JumpMode) || CanvasHistory";
 /// A query node's own context. Commands bound here fire while the SQL editor holds focus,
 /// which is why they carry a modifier: a bare key would be swallowed by typing.
 pub const QUERY_NODE: &str = "QueryNode";

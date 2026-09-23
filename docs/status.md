@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-09-20.
+Last updated: 2026-09-23.
 
 ## Milestones
 
@@ -14,9 +14,30 @@ Last updated: 2026-09-20.
 | M6 | peek-mcp bridge over the mutation API, peek-acp agent node, local Ollama backend | Done |
 | M7 | peek-multiplayer with an event-sink trait replacing Tauri's `AppHandle` | Not started |
 
-Regions and wayfinding are **in**, the two Ollama groupings with them — see below. Canvas
-features that slot in between milestones and are still not started: the minimap, the history
-panel, and the Activity node's running-query list.
+Regions and wayfinding are **in**, the two Ollama groupings with them — see below. So is
+**version history** — see below. Canvas features that slot in between milestones and are still
+not started: the minimap and the Activity node's running-query list.
+
+## Version history
+
+`History::Toggle` (`cmd-y`, and "Show history" in the palette) opens the timeline over the
+bottom of the canvas, and closes it again. The reference has the palette entry only. Checkpoints are captured 30 s after the last edit, at most 3 min into a streak, and at
+once when a page is left, into the same `~/peek/<workspace>/<connection>.history.jsonl` the
+TypeScript app appends to (see `docs/decisions.md` for why that directory). Scrubbing (click a
+dot, ←/→) shows a detached copy of the page; Enter or Restore commits it as one undo step and a
+labelled `Restored Version N` checkpoint; Escape steps back to the present, then closes.
+
+Divergences, each for a stated reason:
+
+- **Every canvas binding is dead while the timeline is open**, not only while a past version is
+  previewed as the reference does: the canvas publishes `CanvasHistory` instead of `Canvas`, which
+  is one switch instead of a guard per command. Zoom keys therefore do not work under the panel;
+  the wheel and trackpad still do.
+- **Opening the palette closes the timeline**, so no palette command ever runs behind a preview.
+- **No backdrop blur, and the canvas does not shrink behind the panel**: gpui has neither. The
+  HUD and toolbar are hidden while the panel is open instead of faded.
+- Previewed query nodes get no language server and never live-poll: they share ids with the live
+  nodes, and `Document::is_detached` is how their editors know.
 
 ## The command palette port
 

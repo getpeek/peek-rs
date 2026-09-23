@@ -58,6 +58,10 @@ icon_assets!(
         ListIndentIncrease,
         ChartLine,
         ChartArea,
+        // The version-history timeline.
+        Clock,
+        Hand,
+        RotateCcw,
     ]
 );
 

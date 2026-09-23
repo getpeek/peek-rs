@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use peek_document::geometry::{Point, Rect, Size};
+use peek_document::history::PageSnapshot;
 use peek_document::{
     CanvasDocument, DrawData, Edge, EdgeId, Node, NodeData, NodeId, NodeType, Page, PageId,
     ResultSet, ResultSidecar, VariableData, Viewport,
@@ -84,6 +85,11 @@ pub struct Document {
     /// re-running a query an undoable edit. They live in their own file on disk
     /// (`<connection>.results.json`) and are re-fetched by running the query again.
     results: ResultSidecar,
+    /// Set on the copy a version-history preview renders. Nothing saves it and it is thrown
+    /// away on the next scrub, so views built over it must not claim anything keyed by node id
+    /// for the whole session — the language server's documents, a live poll against the
+    /// database — or they would collide with the live canvas's views of the same nodes.
+    detached: bool,
 }
 
 impl Document {
@@ -120,7 +126,22 @@ impl Document {
             results_revision: 0,
             in_transaction: false,
             framing: Vec::new(),
+            detached: false,
         }
+    }
+
+    /// A throwaway copy for showing a past version; see the `detached` field.
+    #[must_use]
+    pub fn detached(document: CanvasDocument) -> Self {
+        Self {
+            detached: true,
+            ..Self::load(document)
+        }
+    }
+
+    #[must_use]
+    pub fn is_detached(&self) -> bool {
+        self.detached
     }
 
     /// Increments on every change to the rows, so the results autosave can debounce on it.
@@ -272,6 +293,29 @@ impl Document {
         }
         self.persisted.active_page_id = id.clone();
         self.clear_selection();
+        self.touch();
+        true
+    }
+
+    /// A page's content as version history records it.
+    #[must_use]
+    pub fn page_snapshot(&self, id: &PageId) -> Option<PageSnapshot> {
+        self.persisted.pages.get(id).map(PageSnapshot::of)
+    }
+
+    /// Puts the active page's content back to `snapshot` as one undo step. The page keeps its
+    /// current name, as `useHistoryPanel.restore` does: a restore brings back work, not a title.
+    pub fn restore_page(&mut self, snapshot: PageSnapshot) -> bool {
+        if self.page_snapshot(self.active_page_id()).as_ref() == Some(&snapshot) {
+            return false;
+        }
+        self.begin(EditKind::Structure);
+        let page = self.active_page_mut();
+        page.nodes = snapshot.nodes;
+        page.edges = snapshot.edges;
+        page.regions = snapshot.regions;
+        self.prune_selection();
+        self.checkpoint();
         self.touch();
         true
     }
@@ -921,6 +965,34 @@ mod tests {
         document.checkpoint();
         let id = document.edges()[0].id.clone();
         (document, id)
+    }
+
+    #[test]
+    fn restoring_a_version_keeps_the_page_name_and_undoes_in_one_press() {
+        let mut document = document();
+        let page = document.active_page_id().clone();
+        let before = document.page_snapshot(&page).unwrap();
+        document.select_only([NodeId::from("t1")]);
+        document.delete_selection();
+        document.rename_page(&page, "Renamed".to_string());
+        document.checkpoint();
+
+        assert!(document.restore_page(before.clone()));
+        assert_eq!(document.nodes().len(), 2);
+        assert_eq!(document.active_page().name, "Renamed");
+        assert!(!document.restore_page(PageSnapshot {
+            name: "Renamed".to_string(),
+            ..before
+        }));
+
+        assert!(document.undo());
+        assert_eq!(document.nodes().len(), 1);
+    }
+
+    #[test]
+    fn a_detached_copy_says_so() {
+        assert!(Document::detached(CanvasDocument::empty()).is_detached());
+        assert!(!document().is_detached());
     }
 
     #[test]

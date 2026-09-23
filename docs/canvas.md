@@ -71,6 +71,7 @@ whole pointer model, tested per row:
 | Left down on a node header, moved ≥ 4 px | `DraggingNodes` of the selection (an unselected node is selected first) |
 | Left down on a node body | `SelectOnly` on release; never a drag and never a marquee |
 | Left down on a node's resize zone | `ResizingNode` → `ResizeNode { id, bounds }` per move |
+| Cmd + left down on a node's resize zone | `ResizingNode { symmetric }`: the opposite edge mirrors the grab, so the node resizes about its centre, clamped there to the kind's minimum |
 | Tool armed, click | `PlaceNode` with the default size centred on the cursor, then `CommitPlacement` |
 | Tool armed, drag ≥ 4 px | `PlaceNode` with the dragged rect on the first frame past the threshold, `ResizePlacement` per move after it, `CommitPlacement` on release |
 | Pen armed, left drag | a sample per move in world units; `PlaceDrawing` on release from two samples up |
