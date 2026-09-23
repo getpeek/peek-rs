@@ -1,6 +1,7 @@
 //! The canvas view: owns the camera, flights and the gesture state machine, and renders the
 //! `CanvasElement` that places node shells at camera-derived screen positions.
 
+mod connect;
 pub(crate) mod context_menu;
 mod convert;
 mod dispatch;
@@ -31,7 +32,7 @@ use peek_canvas::direction::{self, Direction};
 use peek_canvas::edge::curve_between;
 use peek_canvas::flight::durations;
 use peek_canvas::gesture::{self, Effect, GestureConfig, Interaction};
-use peek_canvas::hit::{Corner, NodeRegion};
+use peek_canvas::hit::{Corner, Hit, NodeRegion, connection_target};
 use peek_canvas::jump::{JumpMode, Pressed};
 use peek_canvas::layout::bsp;
 use peek_canvas::render_scale;
@@ -1239,7 +1240,10 @@ impl CanvasView {
         if effects.is_empty() {
             // A stroke emits nothing until the pen lifts, but the live preview has to follow the
             // pen, so the sample itself is the state change that earns the repaint.
-            if !self.interaction.stroke_world().is_empty() {
+            // A connection drag is the same: the preview follows the pointer until release.
+            if !self.interaction.stroke_world().is_empty()
+                || self.interaction.connection_preview().is_some()
+            {
                 cx.notify();
             }
             return;
@@ -1321,6 +1325,18 @@ impl CanvasView {
                     }
                 });
             }
+            Effect::Connect { source, world } => {
+                self.document.update(cx, |document, cx| {
+                    let Some(target) = connection_target(document.active_page(), &source, world)
+                    else {
+                        return;
+                    };
+                    if document.connect(&source, &target) {
+                        document.checkpoint();
+                        cx.notify();
+                    }
+                });
+            }
             Effect::GestureEnded => {
                 // Seal the undo transaction the drag or resize opened, so the next gesture is
                 // its own entry however quickly it follows.
@@ -1357,6 +1373,9 @@ impl CanvasView {
         };
         let screen = self.to_pane(event.position);
         let on = self.hit_at(screen, cx);
+        // An option-press on a card may become a connection, which the node's own content
+        // (the SQL editor's caret, the result table's cell selection) must never also claim.
+        let connecting = event.modifiers.alt && matches!(on, Some(Hit::Node(_)));
         self.reduce(
             gesture::Input::Down {
                 button,
@@ -1367,6 +1386,9 @@ impl CanvasView {
             window,
             cx,
         );
+        if connecting {
+            cx.stop_propagation();
+        }
     }
 
     pub(crate) fn mouse_move(
@@ -1376,7 +1398,7 @@ impl CanvasView {
         cx: &mut Context<Self>,
     ) {
         if self.interaction.is_idle() {
-            self.hover(event.position, event.modifiers.secondary(), cx);
+            self.hover(event.position, event.modifiers, cx);
             return;
         }
         let screen = self.to_pane(event.position);
@@ -1413,7 +1435,7 @@ impl CanvasView {
             gesture::Input::Wheel {
                 screen: self.to_pane(event.position),
                 delta: convert::from_pixel_point(delta),
-                modifiers: modifiers(event.modifiers),
+                zoom: event.modifiers.secondary() || event.modifiers.control,
                 phase: phase(event.touch_phase),
             },
             window,
@@ -1447,7 +1469,7 @@ impl CanvasView {
     fn hover(
         &mut self,
         position: gpui_kit::Point<Pixels>,
-        drag_anywhere: bool,
+        modifiers: Modifiers,
         cx: &mut Context<Self>,
     ) {
         let inside = self
@@ -1458,7 +1480,8 @@ impl CanvasView {
                 .then(|| self.node_hit_at(self.to_pane(position), cx))
                 .flatten()
                 .map(|hit| hit.region),
-            drag_anywhere,
+            drag_anywhere: modifiers.secondary(),
+            connect: modifiers.alt,
         };
         if hovered == self.hovered {
             return;
@@ -1699,7 +1722,9 @@ impl CanvasView {
             Interaction::Panning { .. } | Interaction::DraggingNodes { .. } => {
                 CursorStyle::ClosedHand
             }
-            Interaction::Placing { .. } | Interaction::Drawing { .. } => CursorStyle::Crosshair,
+            Interaction::Placing { .. }
+            | Interaction::Drawing { .. }
+            | Interaction::Connecting { .. } => CursorStyle::Crosshair,
             Interaction::ResizingNode { corner, .. } => resize_cursor(*corner),
             _ if self.space_held => CursorStyle::OpenHand,
             _ => hover_cursor(self.hovered),
@@ -1707,19 +1732,21 @@ impl CanvasView {
     }
 }
 
-/// What an idle pointer is over: the region under it, and whether the secondary modifier was
-/// down at that move — cmd turns a node's whole card into a drag handle, which the cursor has
-/// to advertise before the press.
+/// What an idle pointer is over: the region under it, and which modifiers were down at that
+/// move — cmd turns a node's whole card into a drag handle and option into the source of an
+/// edge, and the cursor has to advertise either before the press.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Hover {
     region: Option<NodeRegion>,
     drag_anywhere: bool,
+    connect: bool,
 }
 
 /// The affordance of the region under an idle pointer: `node.css` gives the header `grab` and
 /// leaves the body to whatever the kind's own content wants.
 fn hover_cursor(hovered: Hover) -> CursorStyle {
     match hovered.region {
+        Some(_) if hovered.connect => CursorStyle::Crosshair,
         Some(NodeRegion::Resize(corner)) => resize_cursor(corner),
         Some(NodeRegion::Header) => CursorStyle::OpenHand,
         // With the secondary modifier down the body is a drag handle too.
@@ -1741,7 +1768,7 @@ fn modifiers(modifiers: Modifiers) -> gesture::Modifiers {
     gesture::Modifiers {
         shift: modifiers.shift,
         secondary: modifiers.secondary(),
-        control: modifiers.control,
+        alt: modifiers.alt,
     }
 }
 
@@ -1820,6 +1847,7 @@ impl Render for CanvasView {
             edge_dim: wayfinding::dim(camera.zoom).edges,
             selected_rects,
             marquee: self.interaction.marquee_screen_rect(),
+            connection: self.connection_preview(cx),
             stroke: self.live_stroke(cx),
             background: theme.canvas_base,
             gradient: theme.canvas_gradient,

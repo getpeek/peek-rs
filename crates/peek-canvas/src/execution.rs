@@ -179,11 +179,35 @@ impl Document {
         let size = result_size(&rows);
         let existed = self.node(&id).is_some();
         let placed = id.clone();
+        // `useChartSync`: an empty run is skipped rather than wiping the chart's saved series.
+        let series = (!rows.is_empty()).then(|| chart_series(&rows));
         self.transaction_of(EditKind::Structure, |document| {
-            document.place_result_inner(source, (query, index), (placed, size, existed));
+            document.place_result_inner(source, (query, index), (placed.clone(), size, existed));
+            if let Some(series) = series {
+                document.replot_charts_of(&placed, &series);
+            }
         });
         self.set_result(id.clone(), rows);
         (id, !existed)
+    }
+
+    /// Pushes a result's fresh series into every chart it is wired to, keeping each chart's type.
+    fn replot_charts_of(&mut self, result: &NodeId, series: &[Map<String, Value>]) {
+        let charts: Vec<NodeId> = self
+            .edges()
+            .iter()
+            .filter(|edge| &edge.source == result)
+            .map(|edge| edge.target.clone())
+            .filter(|target| {
+                self.node(target)
+                    .is_some_and(|node| node.node_type() == Some(NodeType::Barchart))
+            })
+            .collect();
+        for chart in charts {
+            self.update_data::<peek_document::BarChartData>(&chart, |data| {
+                data.data = series.to_vec();
+            });
+        }
     }
 
     fn place_result_inner(
@@ -712,6 +736,27 @@ mod tests {
         assert!(!created, "the node was already there");
         let data = peek_document::BarChartData::get(&document.node(&second).unwrap().kind).unwrap();
         assert_eq!(data.data.len(), 5, "and it re-plotted the new rows");
+    }
+
+    /// `useChartSync`: a chart follows its result's rows without being re-charted, and an
+    /// empty run leaves the last series on screen.
+    #[test]
+    fn re_running_the_query_re_plots_its_chart() {
+        let (mut document, query) = with_query();
+        let (result, _) = document.place_result(&query, ("a", 0), plottable(3));
+        let (chart, _) = document.place_chart(&result).unwrap();
+        let plotted = |document: &Document| {
+            peek_document::BarChartData::get(&document.node(&chart).unwrap().kind)
+                .unwrap()
+                .data
+                .len()
+        };
+
+        document.place_result(&query, ("a", 0), plottable(5));
+        assert_eq!(plotted(&document), 5);
+
+        document.place_result(&query, ("a", 0), ResultSet::default());
+        assert_eq!(plotted(&document), 5);
     }
 
     /// A re-chart must not undo a switch to lines: the type is the user's, the data is the

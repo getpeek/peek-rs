@@ -6,6 +6,7 @@
 //! box, so the curve stays well-routed however the nodes are dragged around. The side it
 //! crosses also decides which way the curve leaves, which is why [`Side`] exists at all.
 
+use peek_document::NodeType;
 use peek_document::geometry::{Point, Rect};
 
 /// React Flow's default `getBezierPath` curvature.
@@ -31,6 +32,22 @@ enum Side {
     Right,
     Top,
     Bottom,
+}
+
+/// Whether a drag from a `source` node may drop onto a `target` node: `isValidConnection` in
+/// `ReactFlowCanvas.tsx`, plus query -> agent, which the reference has no handle for. An edge
+/// feeds its source into the target: a variable its value, a result its rows and a query its
+/// SQL, the latter two for an agent.
+#[must_use]
+pub fn can_connect(source: NodeType, target: NodeType) -> bool {
+    match source {
+        NodeType::Variable => matches!(
+            target,
+            NodeType::Query | NodeType::Result | NodeType::ResultInsertForm
+        ),
+        NodeType::Result | NodeType::Query => target == NodeType::Agent,
+        _ => false,
+    }
 }
 
 /// The floating bezier running from `source` to `target`, both in world units.

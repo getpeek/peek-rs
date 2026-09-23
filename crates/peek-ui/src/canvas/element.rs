@@ -18,6 +18,7 @@ use peek_canvas::{Camera, Rect};
 
 use crate::node::draw::{Placement, tessellate};
 
+use super::connect;
 use super::convert::to_pixel_bounds;
 use super::edges::{self, EdgeItem};
 use super::frame_stats::Phase;
@@ -27,6 +28,8 @@ use super::{CanvasView, grid, screen_rect};
 /// Selection ring: constant screen width and offset regardless of zoom (`node.css`).
 const RING_WIDTH: f32 = 1.5;
 const RING_OFFSET: f32 = 3.0;
+/// The ring on a connection's drop target: `node.css`'s `0 0 0 2px` on the hovered valid target.
+const TARGET_RING_WIDTH: f32 = 2.0;
 
 /// The stroke being drawn, as `LiveStroke.tsx` has it: pane-relative screen points, and a
 /// diameter already multiplied by the zoom, because this is painted outside the node layer and
@@ -54,6 +57,8 @@ pub(crate) struct Overlay {
     /// takes from the node's own kind (`--pk-node-type-color`).
     pub selected_rects: Vec<(Rect, Hsla)>,
     pub marquee: Option<Rect>,
+    /// The edge an option-drag is pulling out, painted over the nodes it crosses.
+    pub connection: Option<connect::Preview>,
     pub stroke: Option<LiveStroke>,
     pub background: Hsla,
     pub gradient: Option<(Hsla, Hsla)>,
@@ -254,6 +259,33 @@ impl Element for CanvasElement {
                     *color,
                     BorderStyle::Solid,
                 ));
+            }
+
+            if let Some((world, color)) = self
+                .overlay
+                .connection
+                .as_ref()
+                .and_then(|preview| preview.target)
+            {
+                let screen = offset(screen_rect(camera, world), bounds.origin);
+                let ring = screen.dilate(px(RING_OFFSET));
+                window.paint_quad(quad(
+                    ring,
+                    px(radius + RING_OFFSET),
+                    transparent_black(),
+                    px(TARGET_RING_WIDTH),
+                    color,
+                    BorderStyle::Solid,
+                ));
+            }
+            if let Some(preview) = &self.overlay.connection {
+                edges::paint(
+                    bounds,
+                    camera,
+                    std::slice::from_ref(&preview.edge),
+                    1.0,
+                    window,
+                );
             }
 
             // Above everything, which is `LiveStroke.tsx`'s `zIndex: 1000`: the ink has to

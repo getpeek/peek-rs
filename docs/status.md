@@ -606,8 +606,13 @@ Edge selection is a second session-only `BTreeSet<EdgeId>` on `Document`: it mus
 history snapshot, since `Snapshot` compares by value and selecting would otherwise become an
 undoable edit.
 
-Not done: dragging a new connection into being (the variable node's four source handles are still
-absent for that reason), and the `.flowing` / `.query-live` marching ants, which need live queries
+Option-drag from anywhere on a card onto another card connects them, with the reference's
+`isValidConnection` rules (variable → query / result / result-insert-form, result → agent) plus
+query → agent, a
+live preview curve and a ring on the accepting target. The reference's source handles are
+deliberately not ported — see docs/canvas.md § Connecting.
+
+Not done: the `.flowing` / `.query-live` marching ants, which need live queries
 and so wait for M5.
 
 ### The draw tool
@@ -922,6 +927,10 @@ listeners, the HUD and the toolbar are rebuilt every frame, which is cheap next 
 - **`contextKey` is not the reference's sha1.** It is an opaque dedupe token nothing compares
   across documents, so a transcript written here and reopened in the TypeScript app may insert
   one extra context message.
+- **Query → agent edges are new.** A wired Query node is sent as a `context` message with
+  `contextKind: "query"`: its id, SQL and live-polling state, so "this node" resolves. Ollama
+  replays it like any context; ACP prefixes every prompt with it (the session is not persisted),
+  staging a chip only when it changed. The TypeScript app shows it as an ordinary context chip.
 - **The Query node runs**, and its result shows its rows. `Query::Run` (`meta-enter`) executes
   against the connection opened at startup, places the result or a `query-error` node, and polls
   when live is on.

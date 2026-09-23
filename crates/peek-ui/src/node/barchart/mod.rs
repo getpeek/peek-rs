@@ -47,7 +47,7 @@ pub(crate) fn body(
     id: &NodeId,
     data: &BarChartData,
     context: NodeContext<'_>,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let theme = cx.peek_theme();
@@ -107,7 +107,7 @@ pub(crate) fn body(
                 .flex_1()
                 .min_h_0()
                 .pt(rems(0.5))
-                .child(chart(id, data, &columns, series)),
+                .child(chart(id, data, &columns, series).rem_size(window.rem_size())),
         )
         .into_any_element()
 }

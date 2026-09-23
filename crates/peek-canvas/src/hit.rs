@@ -9,7 +9,7 @@
 use peek_document::geometry::{Point, Rect};
 use peek_document::{Edge, EdgeId, Node, NodeId, NodeKind, Page};
 
-use crate::edge::{EdgeCurve, curve_between};
+use crate::edge::{EdgeCurve, can_connect, curve_between};
 
 /// Height of `NodeShell`'s header in world units: `.app-node-header`'s `min-height: 36px`,
 /// which the shell reaches as `rems(0.5)` of padding either side of one `rems(1.25)` line.
@@ -138,6 +138,31 @@ fn curve_of(page: &Page, edge: &Edge) -> Option<EdgeCurve> {
     let source = page.node(&edge.source)?.bounds();
     let target = page.node(&edge.target)?.bounds();
     Some(curve_between(source, target))
+}
+
+/// The node a connection dragged out of `source` would land on at `world`: the topmost card
+/// there, if [`can_connect`] allows the pair and the edge does not exist yet. The drop and the
+/// hover highlight both ask this, so a highlighted target is always one the drop accepts.
+#[must_use]
+pub fn connection_target(page: &Page, source: &NodeId, world: Point) -> Option<NodeId> {
+    let target = page
+        .nodes
+        .iter()
+        .rev()
+        .filter(|node| !passes_pointers_through(node))
+        .find(|node| node.bounds().contains(world))?;
+    if &target.id == source {
+        return None;
+    }
+    let source_type = page.node(source)?.node_type()?;
+    if !can_connect(source_type, target.node_type()?) {
+        return None;
+    }
+    let id = EdgeId::between(source, &target.id);
+    if page.edges.iter().any(|edge| edge.id == id) {
+        return None;
+    }
+    Some(target.id.clone())
 }
 
 /// Nodes whose bounds overlap `rect` at all (React Flow `SelectionMode.Partial`).
@@ -492,6 +517,89 @@ mod tests {
             edge_hit_at(&page, Point::new(200.0, 50.0)),
             Some(EdgeId::from("target->source")),
             "paint order is array order, so the topmost match is the last one"
+        );
+    }
+
+    /// A variable at x 0..100, a query at 300..400, a text at 600..700, a result at 900..1000
+    /// and an agent at 1200..1300, all 100 tall on one row.
+    fn connectable_page() -> Page {
+        let mut page = Page::new("p");
+        for (x, node_type) in [
+            (0.0, NodeType::Variable),
+            (300.0, NodeType::Query),
+            (600.0, NodeType::Text),
+            (900.0, NodeType::Result),
+            (1200.0, NodeType::Agent),
+        ] {
+            page.nodes.push(Node::new(
+                node_type,
+                Rect::new(Point::new(x, 0.0), Size::new(100.0, 100.0)),
+            ));
+        }
+        page
+    }
+
+    fn id_at(page: &Page, index: usize) -> NodeId {
+        page.nodes[index].id.clone()
+    }
+
+    #[test]
+    fn a_connection_lands_on_a_target_its_source_can_feed() {
+        let page = connectable_page();
+        let (variable, query, result, agent) = (
+            id_at(&page, 0),
+            id_at(&page, 1),
+            id_at(&page, 3),
+            id_at(&page, 4),
+        );
+
+        assert_eq!(
+            connection_target(&page, &variable, Point::new(350.0, 50.0)),
+            Some(query.clone())
+        );
+        assert_eq!(
+            connection_target(&page, &result, Point::new(1250.0, 50.0)),
+            Some(agent.clone())
+        );
+        assert_eq!(
+            connection_target(&page, &query, Point::new(1250.0, 50.0)),
+            Some(agent)
+        );
+    }
+
+    #[test]
+    fn a_connection_refuses_itself_other_kinds_and_bare_canvas() {
+        let page = connectable_page();
+        let (variable, query, text) = (id_at(&page, 0), id_at(&page, 1), id_at(&page, 2));
+
+        assert!(connection_target(&page, &variable, Point::new(50.0, 50.0)).is_none());
+        assert!(connection_target(&page, &variable, Point::new(650.0, 50.0)).is_none());
+        assert!(connection_target(&page, &query, Point::new(50.0, 50.0)).is_none());
+        assert!(connection_target(&page, &text, Point::new(350.0, 50.0)).is_none());
+        assert!(connection_target(&page, &variable, Point::new(200.0, 50.0)).is_none());
+    }
+
+    #[test]
+    fn a_connection_refuses_an_edge_that_already_exists() {
+        let mut page = connectable_page();
+        let (variable, query) = (id_at(&page, 0), id_at(&page, 1));
+        page.edges.push(Edge::between(variable.clone(), query));
+
+        assert!(connection_target(&page, &variable, Point::new(350.0, 50.0)).is_none());
+    }
+
+    #[test]
+    fn a_connection_sees_through_a_drawing_to_the_card_beneath() {
+        let mut page = connectable_page();
+        let (variable, query) = (id_at(&page, 0), id_at(&page, 1));
+        page.nodes.push(Node::new(
+            NodeType::Draw,
+            Rect::new(Point::new(300.0, 0.0), Size::new(100.0, 100.0)),
+        ));
+
+        assert_eq!(
+            connection_target(&page, &variable, Point::new(350.0, 50.0)),
+            Some(query)
         );
     }
 }

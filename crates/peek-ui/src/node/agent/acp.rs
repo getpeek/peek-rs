@@ -65,12 +65,43 @@ pub(super) fn ask(
         return;
     };
 
-    if let Some(session) = acp.session_id().map(str::to_string) {
+    let session = acp.session_id().map(str::to_string);
+    let text = with_query_references(view, text, cx);
+    if let Some(session) = session {
         prompt(view, session, text, window, cx);
         return;
     }
-    acp.queued = Some(text);
+    if let Backend::Acp(acp) = view.backend_mut() {
+        acp.queued = Some(text);
+    }
     open(view, window, cx);
+}
+
+/// Prefixes every prompt with the queries wired into the node, and stages a chip for the ones
+/// the transcript has not shown yet.
+///
+/// Every prompt, not only the fresh ones: the ACP session is not persisted, so an agent reopened
+/// after a restart has never seen a reference the transcript says was sent. A few lines per
+/// wired query is cheap next to the agent not knowing what "this node" is.
+fn with_query_references(
+    view: &mut AgentView,
+    text: String,
+    cx: &mut Context<AgentView>,
+) -> String {
+    let document = view.document_handle();
+    let references = super::context::query_references(document.read(cx), view.node());
+    if references.is_empty() {
+        return text;
+    }
+    let seen = view.committed_messages(cx);
+    for message in super::context::unseen(references.clone(), &seen) {
+        view.stage(message, cx);
+    }
+    let preamble: Vec<String> = references
+        .into_iter()
+        .map(|message| message.message)
+        .collect();
+    format!("{}\n{text}", preamble.join("\n"))
 }
 
 /// Opens the node's session. Idempotent: a second call while one is in flight is ignored.

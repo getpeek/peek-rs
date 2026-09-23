@@ -12,9 +12,7 @@ use gpui_kit::component::plot::label::{
 use gpui_kit::component::plot::scale::{Scale, ScaleBand, ScaleLinear, ScalePoint};
 use gpui_kit::component::plot::shape::{Area, Bar, BarAlignment, Line};
 use gpui_kit::component::plot::tooltip::{CrossLine, Dot, Tooltip, TooltipState};
-use gpui_kit::component::plot::{
-    AXIS_GAP, AxisLabelSide, AxisText, IntoPlot, Plot, PlotAxis, StrokeStyle,
-};
+use gpui_kit::component::plot::{AXIS_GAP, IntoPlot, Plot, PlotAxis, StrokeStyle};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     AnyElement, App, Bounds, Corners, ElementId, Hsla, Pixels, Point, SharedString, Size,
@@ -23,9 +21,12 @@ use gpui_kit::{
 use peek_document::ChartType;
 use peek_theme::ActivePeekTheme;
 
+use crate::node::BASE_REM;
+
 /// Width reserved left of the plot for the value-axis labels, and height reserved below it
-/// for the category labels. Physical pixels: the plot paints text at a fixed
-/// [`TEXT_SIZE`], as every gpui-component chart does.
+/// for the category labels. Every length here is designed in pixels at zoom 1 and multiplied
+/// by [`SeriesChart::scale`] when painted: a plot paints straight to the window, outside the
+/// rem scope that scales the rest of the node with the camera.
 const VALUE_AXIS_WIDTH: f32 = 34.0;
 const TOP_PADDING: f32 = 8.0;
 /// Horizontal room one category label needs before its neighbour has to be dropped.
@@ -34,6 +35,7 @@ const LABEL_BUDGET: f32 = 44.0;
 const BAR_GAP: f32 = 2.0;
 const BAR_CORNER: f32 = 4.0;
 const LINE_WIDTH: f32 = 2.0;
+const DOT_SIZE: f32 = 6.0;
 const AREA_OPACITY: f32 = 0.18;
 /// Intervals the value axis is divided into; five labels, zero included.
 const VALUE_INTERVALS: u16 = 4;
@@ -52,6 +54,8 @@ pub(crate) struct SeriesChart {
     labels: Vec<SharedString>,
     series: Vec<Series>,
     chart_type: ChartType,
+    /// Screen pixels per design pixel: the node's rem scope over the rem it was designed at.
+    scale: f32,
 }
 
 impl SeriesChart {
@@ -61,6 +65,7 @@ impl SeriesChart {
             labels,
             series,
             chart_type: ChartType::Bar,
+            scale: 1.0,
         }
     }
 
@@ -70,13 +75,26 @@ impl SeriesChart {
         self
     }
 
+    /// The rem scope the node is laid out in, so the plot zooms with the rest of the node.
+    #[must_use]
+    pub(crate) fn rem_size(mut self, rem_size: Pixels) -> Self {
+        self.scale = rem_size.as_f32() / BASE_REM;
+        self
+    }
+
+    /// A length designed at zoom 1, as the camera draws it.
+    fn scaled(&self, design: f32) -> f32 {
+        design * self.scale
+    }
+
     /// The plot area inside `bounds`, once the axis labels have taken their room.
-    fn frame(bounds: Bounds<Pixels>) -> Frame {
+    fn frame(&self, bounds: Bounds<Pixels>) -> Frame {
+        let (left, top) = (self.scaled(VALUE_AXIS_WIDTH), self.scaled(TOP_PADDING));
         Frame {
-            left: VALUE_AXIS_WIDTH,
-            top: TOP_PADDING,
-            bottom: (bounds.size.height.as_f32() - AXIS_GAP).max(TOP_PADDING),
-            width: (bounds.size.width.as_f32() - VALUE_AXIS_WIDTH).max(0.0),
+            left,
+            top,
+            bottom: (bounds.size.height.as_f32() - self.scaled(AXIS_GAP)).max(top),
+            width: (bounds.size.width.as_f32() - left).max(0.0),
         }
     }
 
@@ -139,8 +157,8 @@ impl SeriesChart {
         let centres = self.centres(frame);
         let band = self.band_width(frame);
         let slot = band / count(self.series.len()).max(1.0);
-        let width = (slot - BAR_GAP).max(1.0);
-        let radius = px(BAR_CORNER.min(width / 2.0));
+        let width = (slot - self.scaled(BAR_GAP)).max(1.0);
+        let radius = px(self.scaled(BAR_CORNER).min(width / 2.0));
 
         // Grouped bars walk outwards from the category centre, one slot at a time.
         let mut offset = -band / 2.0;
@@ -190,7 +208,7 @@ impl SeriesChart {
                 .x(|mark: &Mark| Some(mark.x))
                 .y(|mark: &Mark| Some(mark.y))
                 .stroke(series.color)
-                .stroke_width(px(LINE_WIDTH))
+                .stroke_width(px(self.scaled(LINE_WIDTH)))
                 .stroke_style(StrokeStyle::Natural)
                 .paint(&bounds, window);
         }
@@ -206,6 +224,7 @@ impl SeriesChart {
         cx: &mut App,
     ) {
         let color = cx.peek_theme().fg_subtle;
+        let (text_size, label_budget) = (px(self.scaled(TEXT_SIZE)), self.scaled(LABEL_BUDGET));
         let centres = self.centres(frame);
         let budget = centres
             .windows(2)
@@ -221,20 +240,18 @@ impl SeriesChart {
             .iter()
             .zip(&centres)
             .filter(|(_, x)| match placed {
-                Some(previous) if **x - previous < LABEL_BUDGET => false,
+                Some(previous) if **x - previous < label_budget => false,
                 _ => {
                     placed = Some(**x);
                     true
                 }
             })
             .map(|(label, x)| {
-                let label = truncate_text_to_width(label, px(TEXT_SIZE), budget, window);
-                Text::new(
-                    label,
-                    point(px(*x), px(frame.bottom + TEXT_GAP * 2.0)),
-                    color,
-                )
-                .align(TextAlign::Center)
+                let label = truncate_text_to_width(label, text_size, budget, window);
+                let top = frame.bottom + self.scaled(TEXT_GAP * 2.0);
+                Text::new(label, point(px(*x), px(top)), color)
+                    .font_size(text_size)
+                    .align(TextAlign::Center)
             })
             .collect();
         PlotLabel::new(texts).paint(&bounds, window, cx);
@@ -250,23 +267,24 @@ impl SeriesChart {
         let color = cx.peek_theme().fg_subtle;
         let scale = self.value_scale(frame);
         let (low, high) = self.extent();
+        let text_size = self.scaled(TEXT_SIZE);
+        let right = frame.left - self.scaled(TEXT_GAP);
 
-        let labels = (0..=VALUE_INTERVALS).filter_map(|interval| {
-            let value = low + (high - low) * f64::from(interval) / f64::from(VALUE_INTERVALS);
-            let tick = scale.tick(&value)?;
-            Some(
-                AxisText::new(format_value(value), px(tick), color)
-                    .font_size(px(TEXT_SIZE))
-                    .align(TextAlign::Right),
-            )
-        });
-
-        PlotAxis::new()
-            .y_axis(false)
-            .y(px(frame.left))
-            .y_label_side(AxisLabelSide::Start)
-            .y_label(labels)
-            .paint(&bounds, window, cx);
+        // Placed by hand rather than through `PlotAxis::y_label`, which offsets each label by
+        // the unscaled text size and gap.
+        let labels = (0..=VALUE_INTERVALS)
+            .filter_map(|interval| {
+                let value = low + (high - low) * f64::from(interval) / f64::from(VALUE_INTERVALS);
+                let tick = scale.tick(&value)?;
+                let origin = point(px(right), px(tick - text_size / 2.0));
+                Some(
+                    Text::new(format_value(value), origin, color)
+                        .font_size(px(text_size))
+                        .align(TextAlign::Right),
+                )
+            })
+            .collect();
+        PlotLabel::new(labels).paint(&bounds, window, cx);
     }
 
     /// The zero line, spanning the plot area only so it never runs under the value labels.
@@ -307,7 +325,7 @@ impl Plot for SeriesChart {
         if self.labels.is_empty() || self.series.is_empty() {
             return;
         }
-        let frame = Self::frame(bounds);
+        let frame = self.frame(bounds);
         self.paint_value_axis(bounds, frame, window, cx);
         self.paint_baseline(bounds, frame, window, cx);
         if self.chart_type == ChartType::Bar {
@@ -328,7 +346,7 @@ impl Plot for SeriesChart {
         bounds: Bounds<Pixels>,
         _: &App,
     ) -> Option<TooltipState> {
-        let frame = Self::frame(bounds);
+        let frame = self.frame(bounds);
         let (index, x) = self.nearest(position.x.as_f32(), frame)?;
         // The markers are built in `tooltip`, where each can carry its own series' colour.
         Some(TooltipState::new(index, point(px(x), px(0.0)), Vec::new()))
@@ -342,7 +360,7 @@ impl Plot for SeriesChart {
         _: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
-        let frame = Self::frame(bounds);
+        let frame = self.frame(bounds);
         let label = self.labels.get(state.index)?;
         let surface = cx.peek_theme().node_bg;
         let scale = self.value_scale(frame);
@@ -360,11 +378,16 @@ impl Plot for SeriesChart {
             .title(label.clone())
             .cross_line(
                 CrossLine::new(state.cross_line)
-                    .band(self.band_width(frame).max(LINE_WIDTH))
+                    .band(self.band_width(frame).max(self.scaled(LINE_WIDTH)))
                     .span(frame.top, frame.bottom - frame.top),
             );
         for (series, value, dot) in hovered {
-            dots.push(Dot::new(dot).fill(series.color).stroke(surface));
+            dots.push(
+                Dot::new(dot)
+                    .size(px(self.scaled(DOT_SIZE)))
+                    .fill(series.color)
+                    .stroke(surface),
+            );
             tooltip = tooltip.row(series.color, series.name.clone(), format_value(value));
         }
         Some(tooltip.dots(dots).into_any_element())

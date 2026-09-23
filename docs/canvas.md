@@ -144,6 +144,10 @@ the grab keeps its width under the pointer instead of thinning out as the camera
   the pressed node is part of it and selecting it first if not. An edge press never drags, modifier
   or not.
 
+Option (alt) held at the press overrides every region: dragging past the threshold starts
+`Interaction::Connecting` instead of a move or resize (see [Edges](#edges)). An option-click with
+no drag still selects.
+
 Draw nodes are skipped entirely: `useDrawTool.ts` commits them with `pointerEvents: "none"`, so
 a stroke is decoration rather than a card — no drag handle, no resize corners, and presses fall
 through to whatever is beneath. `nodes_in_rect` still includes them, so a marquee selects them:
@@ -179,6 +183,25 @@ the control hull, then flattens the curve and takes the minimum distance to a ch
 `EDGE_HIT_WORLD_WIDTH` is 20 **world** units, not screen: React Flow's transparent interaction
 stroke lives inside the transformed viewport, so the target grows on screen with the zoom.
 `hit::hit_at` composes it after `node_hit_at`, so a card always wins over a curve beneath it.
+
+### Connecting
+
+The reference drags new edges out of React Flow's source handles, which are small and easy to
+miss. Here there are no handles: **option-drag from anywhere on a card and release anywhere on
+the target card.** `gesture::begin_drag` turns an option-press on any node region into
+`Interaction::Connecting { source, current }`; the view `stop_propagation`s that press so the
+card's own content (an editor caret, a table selection) never sees it. Release emits
+`Effect::Connect { source, world }` and the view calls `Document::connect`, one structural undo
+step.
+
+`hit::connection_target` decides the drop, and the preview asks the same function, so a ringed
+node is always one the release accepts: the topmost non-draw card under the pointer, not the
+source, not already connected, and allowed by `edge::can_connect` — the reference's
+`isValidConnection`: variable → query / result / result-insert-form, result → agent — plus
+query → agent, which the reference has no handle for. While
+dragging, `canvas/connect.rs` paints the pending curve over the nodes (snapped to the target when
+there is one, ending at the pointer otherwise) and a 2 px ring in the target kind's colour. The
+cursor is a crosshair while connecting and over any card while option is held.
 
 Selection is a second `BTreeSet<EdgeId>` on the session `Document`, not the `Edge.selected`
 field. `history::Snapshot` holds `Vec<Edge>` and compares by value, so a selection stored on the

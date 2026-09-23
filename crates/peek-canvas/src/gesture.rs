@@ -31,7 +31,8 @@ pub struct Modifiers {
     pub shift: bool,
     /// cmd on macOS, ctrl elsewhere.
     pub secondary: bool,
-    pub control: bool,
+    /// option on macOS.
+    pub alt: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +62,8 @@ pub enum Input {
         screen: Point,
         /// Already in pixels (`ScrollDelta::pixel_delta` with [`LINE_HEIGHT`] for lines).
         delta: Point,
-        modifiers: Modifiers,
+        /// cmd or ctrl was held: the wheel zooms about the pointer instead of panning.
+        zoom: bool,
         phase: Phase,
     },
     Pinch {
@@ -122,6 +124,12 @@ pub enum Interaction {
         /// during a stroke cannot shear it.
         samples: Vec<Point>,
     },
+    /// An option-drag out of `source`: the edge follows the pointer until the release names a
+    /// target.
+    Connecting {
+        source: NodeId,
+        current: Point,
+    },
     /// A tool is armed; `origin` is set once the press lands.
     Placing {
         node_type: NodeType,
@@ -146,6 +154,15 @@ impl Interaction {
             Self::Marquee {
                 origin, current, ..
             } => Some(Rect::from_corners(*origin, *current)),
+            _ => None,
+        }
+    }
+
+    /// The node a connection is being dragged out of and the pointer's screen position.
+    #[must_use]
+    pub fn connection_preview(&self) -> Option<(&NodeId, Point)> {
+        match self {
+            Self::Connecting { source, current } => Some((source, *current)),
             _ => None,
         }
     }
@@ -214,6 +231,12 @@ pub enum Effect {
     SelectEdgeOnly(EdgeId),
     ToggleEdgeSelect(EdgeId),
     DeselectAll,
+    /// A connection out of `source` was released at `world`; the view resolves the target
+    /// with [`crate::hit::connection_target`].
+    Connect {
+        source: NodeId,
+        world: Point,
+    },
     /// The viewport may have changed and should be committed to the document.
     GestureEnded,
 }
@@ -244,9 +267,9 @@ pub fn reduce(
         Input::Wheel {
             screen,
             delta,
-            modifiers,
+            zoom,
             phase,
-        } => on_wheel(config, screen, delta, modifiers, phase),
+        } => on_wheel(config, screen, delta, zoom, phase),
         Input::Pinch {
             screen,
             delta,
@@ -392,6 +415,12 @@ fn on_move(
             *last = screen;
             vec![Effect::Pan(delta)]
         }
+        // Nothing changes in the document until the release; the view repaints the preview
+        // from the state itself.
+        Interaction::Connecting { current, .. } => {
+            *current = screen;
+            Vec::new()
+        }
         Interaction::Marquee {
             origin,
             current,
@@ -468,6 +497,17 @@ fn begin_drag(
         *state = Interaction::Panning { last: start.screen };
         return vec![Effect::Pan(start.screen - start.origin)];
     }
+    // Option turns the whole card, header, body and resize bands alike, into the source end of
+    // an edge. It is checked before every other node rule so no region can shadow it.
+    if start.modifiers.alt
+        && let Some(Hit::Node(hit)) = &start.on
+    {
+        *state = Interaction::Connecting {
+            source: hit.id.clone(),
+            current: start.screen,
+        };
+        return Vec::new();
+    }
     // A press on an edge never drags and never marquees: `useRubberBandSelect` bails on an edge
     // press and React Flow has no edge drag. It stays in `PendingPress`, so the release still
     // selects the edge.
@@ -543,7 +583,7 @@ fn begin_drag(
     effects
 }
 
-fn on_up(state: &mut Interaction, camera: Camera, button: Button, _screen: Point) -> Vec<Effect> {
+fn on_up(state: &mut Interaction, camera: Camera, button: Button, screen: Point) -> Vec<Effect> {
     let previous = std::mem::take(state);
     match previous {
         // A placement whose press never landed cancels like an idle release, and `Drawing` is
@@ -588,6 +628,10 @@ fn on_up(state: &mut Interaction, camera: Camera, button: Button, _screen: Point
                 Effect::CommitPlacement,
             ]
         }
+        Interaction::Connecting { source, .. } => vec![Effect::Connect {
+            source,
+            world: camera.screen_to_world(screen),
+        }],
         Interaction::Panning { .. }
         | Interaction::Marquee { .. }
         | Interaction::DraggingNodes { .. }
@@ -625,14 +669,14 @@ fn on_wheel(
     config: &GestureConfig,
     screen: Point,
     delta: Point,
-    modifiers: Modifiers,
+    zoom: bool,
     phase: Phase,
 ) -> Vec<Effect> {
     if config.camera_locked {
         return Vec::new();
     }
     let mut effects = Vec::new();
-    if modifiers.secondary || modifiers.control {
+    if zoom {
         let factor = (2.0_f64).powf(-delta.y * WHEEL_ZOOM_EXPONENT);
         effects.push(Effect::ZoomAbout {
             anchor: screen,
@@ -1046,13 +1090,10 @@ mod tests {
 
     #[test]
     fn wheel_pans_and_modified_wheel_zooms() {
-        let wheel = |delta: Point, secondary: bool, phase: Phase| Input::Wheel {
+        let wheel = |delta: Point, zoom: bool, phase: Phase| Input::Wheel {
             screen: Point::new(100.0, 100.0),
             delta,
-            modifiers: Modifiers {
-                secondary,
-                ..Modifiers::default()
-            },
+            zoom,
             phase,
         };
         let mut state = Interaction::default();
@@ -1182,6 +1223,116 @@ mod tests {
             },
             on: Some(on),
         }
+    }
+
+    fn alt_press(at: Point, hit: NodeHit) -> Input {
+        Input::Down {
+            button: Button::Left,
+            screen: at,
+            modifiers: Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+            on: Some(Hit::Node(hit)),
+        }
+    }
+
+    /// Option-dragging from any region of a card starts a connection: nothing moves, resizes
+    /// or gets selected, and the release hands the view the drop point in world units.
+    #[test]
+    fn alt_dragging_anywhere_on_a_node_connects_it() {
+        for region in [
+            NodeRegion::Header,
+            NodeRegion::Body,
+            NodeRegion::Resize(Corner::BottomRight),
+        ] {
+            let mut state = Interaction::default();
+            let config = GestureConfig::default();
+            let selected = BTreeSet::new();
+
+            let moving = drive(
+                &mut state,
+                &config,
+                &selected,
+                vec![
+                    alt_press(Point::new(10.0, 100.0), on("v1", region)),
+                    Input::Move {
+                        screen: Point::new(80.0, 120.0),
+                    },
+                ],
+            );
+            assert!(moving.is_empty(), "{region:?}: {moving:?}");
+            assert_eq!(
+                state.connection_preview(),
+                Some((&id("v1"), Point::new(80.0, 120.0)))
+            );
+
+            let released = drive(
+                &mut state,
+                &config,
+                &selected,
+                vec![Input::Up {
+                    button: Button::Left,
+                    screen: Point::new(400.0, 200.0),
+                }],
+            );
+            assert_eq!(
+                released,
+                vec![Effect::Connect {
+                    source: id("v1"),
+                    world: Point::new(200.0, 100.0),
+                }],
+                "{region:?}"
+            );
+            assert!(state.is_idle());
+        }
+    }
+
+    #[test]
+    fn an_alt_click_without_a_drag_still_selects() {
+        let mut state = Interaction::default();
+
+        let effects = drive(
+            &mut state,
+            &GestureConfig::default(),
+            &BTreeSet::new(),
+            vec![
+                alt_press(Point::new(10.0, 100.0), on("v1", NodeRegion::Body)),
+                Input::Up {
+                    button: Button::Left,
+                    screen: Point::new(11.0, 100.0),
+                },
+            ],
+        );
+
+        assert_eq!(effects, vec![Effect::SelectOnly(vec![id("v1")])]);
+    }
+
+    #[test]
+    fn an_alt_drag_on_bare_canvas_is_still_a_marquee() {
+        let mut state = Interaction::default();
+
+        drive(
+            &mut state,
+            &GestureConfig::default(),
+            &BTreeSet::new(),
+            vec![
+                Input::Down {
+                    button: Button::Left,
+                    screen: Point::new(10.0, 10.0),
+                    modifiers: Modifiers {
+                        alt: true,
+                        ..Modifiers::default()
+                    },
+                    on: None,
+                },
+                Input::Move {
+                    screen: Point::new(80.0, 80.0),
+                },
+            ],
+        );
+
+        assert!(state.marquee_screen_rect().is_some());
     }
 
     /// The secondary modifier turns the body into a drag handle, selecting the node first when
@@ -1632,7 +1783,7 @@ mod tests {
                 Input::Wheel {
                     screen: Point::new(10.0, 10.0),
                     delta: Point::new(0.0, -30.0),
-                    modifiers: Modifiers::default(),
+                    zoom: false,
                     phase: Phase::Moved,
                 },
             ],

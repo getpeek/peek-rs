@@ -134,7 +134,14 @@ pub(super) fn chip(message: &AgentMessage, context_updated: bool, cx: &App) -> A
                 "Context inserted"
             }
             .to_string(),
-            Some("Query and result".to_string()),
+            Some(
+                if message.context_kind.as_deref() == Some(super::context::QUERY_CONTEXT) {
+                    "Query node"
+                } else {
+                    "Query and result"
+                }
+                .to_string(),
+            ),
         ),
         "thought" => (
             IconName::Lightbulb,

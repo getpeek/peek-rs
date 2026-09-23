@@ -251,6 +251,9 @@ fn replay(chat: Chat, message: &AgentMessage) -> Chat {
         "user" => chat.user(message.message.clone()),
         "assistant" => chat.assistant(message.message.clone()),
         "system" => chat.system(message.message.clone()),
+        "context" if message.context_kind.as_deref() == Some(super::context::QUERY_CONTEXT) => chat
+            .user(message.message.clone())
+            .assistant("Ok! I know which query node you mean."),
         "context" => chat
             .user(format!(
                 "Here is a fresh query and data:\n{}",

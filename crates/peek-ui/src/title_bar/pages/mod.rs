@@ -32,12 +32,12 @@ use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::kbd::Kbd;
-use gpui_kit::component::{Icon, Sizable, StyledExt};
+use gpui_kit::component::{Icon, Sizable, Size, StyledExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     App, BoxShadow, ClickEvent, Context, Div, Entity, FocusHandle, FontWeight, Global,
-    KeyDownEvent, MouseButton, MouseDownEvent, Rems, SharedString, Subscription, Window, div,
-    point, px, rems,
+    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Rems, SharedString, Subscription, Window,
+    div, point, px, rems,
 };
 use peek_config::PageDisplay;
 use peek_document::PageId;
@@ -47,6 +47,10 @@ use crate::canvas::CanvasView;
 use crate::commands::actions;
 use crate::settings::Settings;
 use search::PageRow;
+
+/// The list-mode pill's height, the connection pill's: the two sit in the same bar and a
+/// hairline that disagrees with its neighbour by a pixel reads as a mistake.
+const PILL_HEIGHT: Pixels = px(26.0);
 
 /// How wide a tab is while its name is being typed, between the reference's `min-width: 40px`
 /// and its `max-width: 220px`.
@@ -300,7 +304,7 @@ impl PageTabs {
             .text_xs()
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme.fg)
-            .child(status_dot(row.active, cx))
+            .when(row.active, |this| this.child(status_dot(cx)))
             .child(
                 div()
                     .flex_1()
@@ -337,7 +341,7 @@ fn tab_pill(row: &PageRow, cx: &App) -> Div {
         .text_xs()
         .font_weight(FontWeight::MEDIUM)
         .text_color(if row.active { theme.fg } else { theme.fg_muted })
-        .child(status_dot(row.active, cx))
+        .when(row.active, |this| this.child(status_dot(cx)))
         .child(div().min_w_0().truncate().child(row.name.clone()))
 }
 
@@ -372,25 +376,24 @@ impl Render for TabPreview {
     }
 }
 
-/// The tab's leading dot. Lit and glowing on the active page, dim on the others — and the same
-/// one on a tab being renamed, which is why it is not inlined in `tab`.
-fn status_dot(active: bool, cx: &App) -> impl IntoElement {
+/// The leading dot, on the active page alone — on a tab, on the list-mode pill and on a tab
+/// being renamed, which is why it is not inlined in `tab`. A dot on every tab says nothing;
+/// the reference lights only `.page-tab-active`.
+fn status_dot(cx: &App) -> impl IntoElement {
     let theme = cx.peek_theme();
     let glow = theme.green;
     div()
         .size(rems(0.375))
         .flex_shrink_0()
         .rounded_full()
-        .bg(if active { theme.green } else { theme.fg_subtle })
-        .when(active, move |this| {
-            this.shadow(vec![BoxShadow {
-                color: glow,
-                offset: point(px(0.0), px(0.0)),
-                blur_radius: px(8.0),
-                spread_radius: px(0.0),
-                inset: false,
-            }])
-        })
+        .bg(theme.green)
+        .shadow(vec![BoxShadow {
+            color: glow,
+            offset: point(px(0.0), px(0.0)),
+            blur_radius: px(8.0),
+            spread_radius: px(0.0),
+            inset: false,
+        }])
 }
 
 /// Only on the active tab, and only when another page exists to fall back to — not hover-gated,
@@ -495,14 +498,18 @@ fn pill(label: SharedString, badge: Option<Kbd>, state: (bool, &App)) -> Button 
     let theme = cx.peek_theme();
     Button::new("pages-pill")
         .ghost()
-        .xsmall()
+        // Sized rather than `xsmall`: that preset is 20 px tall and `Button::render` clips its
+        // content, which took the pill's rounded top and bottom edges off with it.
+        .with_size(Size::Size(PILL_HEIGHT))
+        .h(PILL_HEIGHT)
         .p_0()
+        .rounded(theme.radius_pill)
         .child(
             div()
                 .h_flex()
                 .gap(px(6.0))
+                .h_full()
                 .px_3()
-                .py_1()
                 .max_w(rems(15.0))
                 .rounded(theme.radius_pill)
                 .border_1()
@@ -511,13 +518,7 @@ fn pill(label: SharedString, badge: Option<Kbd>, state: (bool, &App)) -> Button 
                 .text_xs()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.fg)
-                .child(
-                    div()
-                        .size(rems(0.375))
-                        .flex_shrink_0()
-                        .rounded_full()
-                        .bg(theme.green),
-                )
+                .child(status_dot(cx))
                 .child(div().min_w_0().truncate().child(label))
                 .child(Icon::new(IconName::ChevronDown).size(px(8.0)))
                 .children(badge),

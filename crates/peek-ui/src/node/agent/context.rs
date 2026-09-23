@@ -8,6 +8,12 @@
 //! This is the Ollama path only. An ACP agent reads the canvas through Peek's MCP server, which
 //! is both richer and does not spend the context window on rows it may not need.
 //!
+//! A Query node wired into the agent is sent as a reference instead — its id, SQL and whether it
+//! is live polling — so the user can say "this node" and the model knows which one they mean.
+//! Unlike rows, both backends get it: an ACP agent can read the canvas, but not which card the
+//! user has in mind. The reference has no query -> agent edge, so this has no counterpart there;
+//! its `context_kind` is `"query"`, a free string the TypeScript app renders as any context.
+//!
 //! Two deliberate differences from the reference. It syncs on every render, which writes to the
 //! document from a render pass; this gathers at the start of a turn instead, which is the moment
 //! the rows are actually needed. And it inlines every row without a bound — a million-row result
@@ -17,7 +23,9 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use peek_canvas::Document;
-use peek_document::{AgentMessage, NodeId, NodeType, ResultData, ResultSet};
+use peek_document::{
+    AgentMessage, LiveInterval, NodeId, NodeType, QueryData, ResultData, ResultSet,
+};
 
 use super::view::now_ms;
 
@@ -34,13 +42,53 @@ pub(super) fn gather(
     agent: &NodeId,
     seen: &[AgentMessage],
 ) -> Vec<AgentMessage> {
+    let mut candidates = query_references(document, agent);
+    candidates.extend(results(document, agent));
+    unseen(candidates, seen)
+}
+
+/// One `context` message per Query node wired into `agent`, whether or not it has been sent.
+pub(super) fn query_references(document: &Document, agent: &NodeId) -> Vec<AgentMessage> {
+    sources(document, agent, NodeType::Query)
+        .into_iter()
+        .filter_map(|source| {
+            let data: &QueryData = peek_document::NodeData::get(&document.node(&source)?.kind)?;
+            let live = match data.live_interval_ms {
+                Some(LiveInterval::EveryMs(ms)) => Some(ms),
+                Some(LiveInterval::Off) | None => None,
+            };
+            let mut message =
+                AgentMessage::new("context", reference(&source, data, live), now_ms());
+            message.context_key = Some(query_fingerprint(&source, data, live));
+            message.context_kind = Some(QUERY_CONTEXT.to_string());
+            Some(message)
+        })
+        .collect()
+}
+
+/// The `context_kind` of a query reference.
+pub(super) const QUERY_CONTEXT: &str = "query";
+
+/// The messages in `candidates` whose key is not already in the transcript.
+pub(super) fn unseen(candidates: Vec<AgentMessage>, seen: &[AgentMessage]) -> Vec<AgentMessage> {
     let known: Vec<&str> = seen
         .iter()
         .filter(|message| message.is("context"))
         .filter_map(|message| message.context_key.as_deref())
         .collect();
+    candidates
+        .into_iter()
+        .filter(|message| {
+            message
+                .context_key
+                .as_deref()
+                .is_none_or(|key| !known.contains(&key))
+        })
+        .collect()
+}
 
-    sources(document, agent)
+fn results(document: &Document, agent: &NodeId) -> Vec<AgentMessage> {
+    sources(document, agent, NodeType::Result)
         .into_iter()
         .filter_map(|source| {
             let rows = document.result(&source)?;
@@ -48,9 +96,6 @@ pub(super) fn gather(
                 return None;
             }
             let key = fingerprint(&source, rows);
-            if known.contains(&key.as_str()) {
-                return None;
-            }
             // The SQL that produced these rows is recorded on the result itself by
             // `place_result`, so it is right even if the query node has since been edited.
             let query = document
@@ -66,8 +111,9 @@ pub(super) fn gather(
         .collect()
 }
 
-/// Result nodes feeding this agent, in edge order so two of them resolve the same way every run.
-fn sources(document: &Document, agent: &NodeId) -> Vec<NodeId> {
+/// Nodes of `kind` feeding this agent, in edge order so two of them resolve the same way every
+/// run.
+fn sources(document: &Document, agent: &NodeId, kind: NodeType) -> Vec<NodeId> {
     let mut edges: Vec<&peek_document::Edge> = document
         .edges()
         .iter()
@@ -82,9 +128,22 @@ fn sources(document: &Document, agent: &NodeId) -> Vec<NodeId> {
             document
                 .node(source)
                 .and_then(peek_document::Node::node_type)
-                == Some(NodeType::Result)
+                == Some(kind)
         })
         .collect()
+}
+
+/// What the model is told about a wired query. The id is the handle the canvas tools take, so
+/// "this node" resolves to something the agent can act on.
+fn reference(id: &NodeId, data: &QueryData, live: Option<u64>) -> String {
+    let polling = live.map_or("It is not live polling.".to_string(), |ms| {
+        format!("It is live polling every {ms} ms.")
+    });
+    format!(
+        "The user wired Query node `{id}` into this conversation. When they say \"this node\" \
+         or \"this query\", they mean it. {polling}\n\nSQL:\n{}\n",
+        data.query
+    )
 }
 
 /// The query and its rows, as the reference lays them out.
@@ -119,6 +178,15 @@ fn render(query: &str, rows: &ResultSet) -> String {
     body
 }
 
+/// A query reference changes, and is sent again, when its SQL or its polling does.
+fn query_fingerprint(id: &NodeId, data: &QueryData, live: Option<u64>) -> String {
+    let mut hasher = DefaultHasher::new();
+    id.as_str().hash(&mut hasher);
+    data.query.hash(&mut hasher);
+    live.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 /// Identifies a result by what it contains, so re-running the same query with the same answer
 /// is the same context and a changed answer is a new one.
 ///
@@ -145,8 +213,8 @@ mod tests {
     use peek_canvas::Document;
     use peek_document::geometry::{Point, Rect, Size};
     use peek_document::{
-        AgentData, AgentMessage, CanvasDocument, Cell, Column, Node, NodeId, NodeKind, NodeType,
-        QueryData, ResultData, ResultSet,
+        AgentData, AgentMessage, CanvasDocument, Cell, Column, LiveInterval, Node, NodeId,
+        NodeKind, NodeType, QueryData, ResultData, ResultSet,
     };
 
     fn canvas(row_count: usize) -> Document {
@@ -251,6 +319,39 @@ mod tests {
         let lines = context[0].message.lines().count();
         assert!(lines < MAX_ROWS + 12, "the rows were capped, got {lines}");
         assert!(context[0].message.contains("7 more rows not shown"));
+    }
+
+    fn wired_query(live: Option<u64>) -> Document {
+        let mut document = canvas(0);
+        let query = NodeId::from("query_1");
+        document.connect(&query, &NodeId::from("agent_1"));
+        document.update_data(&query, |data: &mut QueryData| {
+            data.live_interval_ms = live.map(LiveInterval::EveryMs);
+        });
+        document
+    }
+
+    #[test]
+    fn a_wired_query_is_referenced_by_id_sql_and_polling() {
+        let context = gathered(&wired_query(None), &[]);
+
+        assert_eq!(context.len(), 1);
+        assert_eq!(context[0].context_kind.as_deref(), Some("query"));
+        let text = &context[0].message;
+        assert!(text.contains("`query_1`"), "{text}");
+        assert!(text.contains("this node"), "{text}");
+        assert!(text.contains("select id from users"), "{text}");
+        assert!(text.contains("not live polling"), "{text}");
+
+        let live = gathered(&wired_query(Some(5000)), &[]);
+        assert!(live[0].message.contains("live polling every 5000 ms"));
+    }
+
+    #[test]
+    fn a_query_reference_is_sent_again_only_when_its_polling_or_sql_changes() {
+        let seen = gathered(&wired_query(None), &[]);
+        assert!(gathered(&wired_query(None), &seen).is_empty());
+        assert_eq!(gathered(&wired_query(Some(5000)), &seen).len(), 1);
     }
 
     #[test]
