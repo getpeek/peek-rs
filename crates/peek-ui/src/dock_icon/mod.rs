@@ -1,8 +1,9 @@
 //! The macOS Dock icon, applied at startup.
 //!
-//! Peek runs unbundled, so there is no `.icns` for the Dock to read and it falls back to the
-//! generic executable glyph. `-[NSApplication setApplicationIconImage:]` overrides that for the
-//! lifetime of the process, which is all an unbundled binary can get.
+//! Under `cargo run` Peek is unbundled, so there is no `.icns` for the Dock to read and it falls
+//! back to the generic executable glyph. `-[NSApplication setApplicationIconImage:]` overrides
+//! that for the lifetime of the process, which is all an unbundled binary can get. The app
+//! bundle `scripts/package.sh` builds renders its `.icns` from this same image.
 //!
 //! The reference app carries one icon per theme; this is the dark one, used for every theme.
 

@@ -1,0 +1,166 @@
+name: Build, sign and notarize macOS app
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  APPLE_TEAM_ID: 93JGDXCC8N
+  SIGNING_IDENTITY: "Developer ID Application: Damoon Rashidi (93JGDXCC8N)"
+  APP_BUNDLE: "target/Peek RS.app"
+
+jobs:
+  release-macos:
+    runs-on: macos-latest
+    environment: default
+    # softprops/action-gh-release calls the Releases API, which needs
+    # write access to contents. The default GITHUB_TOKEN scope is read-only.
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+
+      - name: Read version and verify it matches the tag
+        run: |
+          set -euo pipefail
+          VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "peek") | .version')
+          if [[ "$GITHUB_REF" == refs/tags/* && "${GITHUB_REF_NAME#v}" != "$VERSION" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match the workspace version $VERSION"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "ASSET_STEM=Peek-RS-$VERSION-aarch64" >> "$GITHUB_ENV"
+
+      - name: Import Apple Developer Certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o $CERTIFICATE_PATH
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security import $CERTIFICATE_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+          # Allow codesign to access keychain
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          echo "Certificates in keychain:"
+          security find-identity -v -p codesigning $KEYCHAIN_PATH
+          if ! security find-identity -v -p codesigning $KEYCHAIN_PATH | grep -q "Developer ID Application"; then
+            echo "ERROR: Developer ID Application certificate not found in keychain!"
+            exit 1
+          fi
+
+      - name: Build and sign the app bundle
+        run: ./scripts/package.sh --no-install --sign "$SIGNING_IDENTITY"
+
+      - name: Notarize the app, then build, notarize and staple the DMG
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          API_KEY_PATH=$RUNNER_TEMP/api_key.p8
+          echo -n "$APPLE_API_KEY" | base64 --decode -o "$API_KEY_PATH"
+
+          notarize() {
+            xcrun notarytool submit "$1" \
+              --key "$API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" \
+              --wait --timeout 30m
+          }
+
+          # notarytool takes a zip, not a bare .app; the ticket is then stapled to the .app
+          # itself so Gatekeeper can check it offline.
+          SUBMISSION="$RUNNER_TEMP/submission.zip"
+          ditto -c -k --keepParent "$APP_BUNDLE" "$SUBMISSION"
+          notarize "$SUBMISSION"
+          xcrun stapler staple "$APP_BUNDLE"
+
+          STAGING="$RUNNER_TEMP/dmg"
+          mkdir -p "$STAGING"
+          ditto "$APP_BUNDLE" "$STAGING/Peek RS.app"
+          ln -s /Applications "$STAGING/Applications"
+          DMG="$RUNNER_TEMP/$ASSET_STEM.dmg"
+          hdiutil create -volname "Peek RS" -srcfolder "$STAGING" -format UDZO -ov "$DMG"
+          codesign --sign "$SIGNING_IDENTITY" --timestamp "$DMG"
+          notarize "$DMG"
+          xcrun stapler staple "$DMG"
+
+          echo "DMG=$DMG" >> "$GITHUB_ENV"
+
+      - name: Verify signing, notarization, and stapling
+        run: |
+          set -euo pipefail
+          codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+          codesign -dvv "$APP_BUNDLE"
+          spctl -a -vvv -t exec "$APP_BUNDLE"
+          spctl -a -vvv -t open --context context:primary-signature "$DMG"
+          xcrun stapler validate "$APP_BUNDLE"
+          xcrun stapler validate "$DMG"
+
+      - name: Zip .app with ditto (preserve bundle metadata)
+        run: |
+          set -euo pipefail
+          APP_ZIP="$RUNNER_TEMP/$ASSET_STEM.app.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$APP_ZIP"
+          ls -lh "$APP_ZIP" "$DMG"
+          echo "APP_ZIP=$APP_ZIP" >> "$GITHUB_ENV"
+
+      - name: Upload macOS ARM64 build
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: |
+            ${{ env.DMG }}
+            ${{ env.APP_ZIP }}
+
+      - name: Extract release notes from tag message
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          # actions/checkout clobbers annotated tag objects (actions/checkout#290);
+          # re-fetch the real tag so its message is readable.
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          NOTES_FILE="$RUNNER_TEMP/release-notes.md"
+          # A lightweight tag points straight at the commit, where %(contents) would yield
+          # the commit message — leave the body empty there so the release falls back to
+          # auto-generated notes only.
+          if [ "$(git cat-file -t "$GITHUB_REF_NAME")" = "tag" ]; then
+            git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > "$NOTES_FILE"
+          else
+            : > "$NOTES_FILE"
+          fi
+          cat "$NOTES_FILE"
+
+      - name: Create Release (if tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          body_path: ${{ runner.temp }}/release-notes.md
+          generate_release_notes: true
+          files: |
+            ${{ env.DMG }}
+            ${{ env.APP_ZIP }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/app-signing.keychain-db" ]; then
+            security delete-keychain $RUNNER_TEMP/app-signing.keychain-db
+          fi
+          rm -f "$RUNNER_TEMP/build_certificate.p12" "$RUNNER_TEMP/api_key.p8"

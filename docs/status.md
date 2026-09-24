@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-09-23.
+Last updated: 2026-09-24.
 
 ## Milestones
 
@@ -767,7 +767,8 @@ one pinned left and one centred, and below about 750 px the centred one runs int
 ## Persistence is opt-in
 
 The app reads the real `~/peek/settings.json` and `~/peek/workspaces/<ws>/<conn>.json`, and
-writes only when launched with `--write`. `peek_config::PersistenceMode` still gates every save
+writes only when launched with `--write`, or from the installed app bundle, whose
+`LSEnvironment` sets `PEEK_PERSISTENCE=write` (see [release.md](release.md)). `peek_config::PersistenceMode` still gates every save
 path (`PeekConfig::save_to_disk`, `DocumentFile::save`, theme commit) and still defaults to
 `ReadOnly`, so the Tauri app can keep running and autosaving alongside.
 
@@ -780,6 +781,13 @@ previous contents to `<connection>.json.bak`.
 Autosave itself is a 3 s debounce off the session document's revision counter, restarted on
 every edit and flushed on quit, matching `useAutoSaveDocument.ts`. Selection changes do not
 bump the revision, so they never schedule a write.
+
+## Packaging and releases
+
+`./scripts/package.sh` builds, signs and installs **Peek RS.app** next to the Tauri app, and
+`.github/workflows/release-macos.yml` builds a notarized DMG and zip for every `v*` tag. See
+[release.md](release.md). Not ported: the Tauri updater and the `peek://` deep-link scheme. The
+CI secrets have to be set on getpeek/peek-rs before the first release.
 
 ## Run and verify
 

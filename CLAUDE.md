@@ -162,6 +162,7 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cargo build --timings                                      # when compile times regress
+./scripts/package.sh [--no-install]                        # build, sign and install "Peek RS.app" (docs/release.md)
 ```
 
 Always run clippy and fmt after making changes. Run the fast tests when touching the gpui-free crates.

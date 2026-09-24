@@ -15,6 +15,7 @@ Read in this order when picking the project up:
 | [themes.md](themes.md) | ThemeSpec tables, the two theme globals, mapping onto gpui-component, picker |
 | [testing.md](testing.md) | The three test layers and how to drive the UI headlessly |
 | [porting.md](porting.md) | What in the Tauri host is portable and how each module is brought over |
+| [release.md](release.md) | Building and installing the app bundle, the signed release pipeline, its secrets |
 | [decisions.md](decisions.md) | Decisions made with the user, and the reasoning that is not obvious from code |
 
 `CLAUDE.md` at the repo root holds the rules for working in this codebase (lints, style, gpui-kit

@@ -64,12 +64,30 @@ pub struct Launch {
     pub fps: bool,
 }
 
+/// Set to `write` by the app bundle's `LSEnvironment`: a Dock or Spotlight launch has no way to
+/// pass `--write`, and an installed app that never saves is not one anybody can use.
+const PERSISTENCE_VARIABLE: &str = "PEEK_PERSISTENCE";
+
 impl Launch {
+    /// This process's launch options: its arguments, over the persistence `PEEK_PERSISTENCE`
+    /// asks for.
+    #[must_use]
+    pub fn from_environment() -> Self {
+        let persistence = match std::env::var(PERSISTENCE_VARIABLE).as_deref() {
+            Ok("write") => PersistenceMode::ReadWrite,
+            _ => PersistenceMode::ReadOnly,
+        };
+        Self::from_args(std::env::args(), persistence)
+    }
+
     /// Parses
     /// `--workspace <name> --connection <name> [--write | --read-only] [--performance] [--fps]`.
-    #[must_use]
-    pub fn from_args(args: impl IntoIterator<Item = String>) -> Self {
-        let mut launch = Self::default();
+    /// `persistence` holds unless one of the two persistence flags overrides it.
+    fn from_args(args: impl IntoIterator<Item = String>, persistence: PersistenceMode) -> Self {
+        let mut launch = Self {
+            persistence,
+            ..Self::default()
+        };
         let mut args = args.into_iter().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -166,7 +184,7 @@ mod launch_tests {
     fn parse(args: &[&str]) -> Launch {
         let mut all = vec!["peek".to_string()];
         all.extend(args.iter().map(|arg| (*arg).to_string()));
-        Launch::from_args(all)
+        Launch::from_args(all, PersistenceMode::ReadOnly)
     }
 
     #[test]
@@ -202,6 +220,17 @@ mod launch_tests {
         assert!(launch.fps);
         assert!(launch.performance);
         assert_eq!(launch.persistence, PersistenceMode::ReadWrite);
+    }
+
+    /// The bundle's environment turns writing on, and an explicit flag still turns it off.
+    #[test]
+    fn a_persistence_flag_overrides_the_environment_default() {
+        let launch = Launch::from_args(["peek".to_string()], PersistenceMode::ReadWrite);
+        assert_eq!(launch.persistence, PersistenceMode::ReadWrite);
+
+        let arguments = ["peek", "--read-only"].map(str::to_string);
+        let launch = Launch::from_args(arguments, PersistenceMode::ReadWrite);
+        assert_eq!(launch.persistence, PersistenceMode::ReadOnly);
     }
 
     /// An unknown argument is logged and skipped rather than taken as a value, so one typo does
